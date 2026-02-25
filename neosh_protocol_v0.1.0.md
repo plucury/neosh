@@ -35,12 +35,14 @@ terminal state synchronization.
 # 3. Connection Model
 
 Each QUIC connection represents a client connection.
+Each QUIC connection carries exactly one logical session.
 
 Each connection MUST:
 
 1.  Open a bidirectional stream as the control stream
 2.  Complete AUTH over the control stream
-3.  Only after AUTH success may data streams be used
+3.  Send ATTACH or RESUME and receive success
+4.  Only after ATTACH_OK or RESUME_OK may data streams be used
 
 ------------------------------------------------------------------------
 
@@ -92,6 +94,7 @@ bytes payload (UTF-8 JSON)
 
 Unknown fields MUST be ignored.\
 Unknown message types MUST produce ERROR.
+All failed requests MUST return an ERROR message.
 
 ------------------------------------------------------------------------
 
@@ -115,9 +118,20 @@ Server → Client
 ``` json
 {
   "type": "HELLO_ACK",
+  "protocol_version": "0.1.0",
   "server_version": "neosh-agent/0.1.0",
   "capabilities": ["stdin-bytes", "resume-v1"],
   "session_timeout_seconds": 600
+}
+```
+
+If `protocol_version` is unsupported, server MUST return:
+
+``` json
+{
+  "type": "ERROR",
+  "code": "PROTOCOL_ERROR",
+  "message": "unsupported protocol_version"
 }
 ```
 
@@ -142,13 +156,25 @@ Server → Client (success)
   "type": "AUTH_OK",
   "session_id": "uuid",
   "resume_token": "base64-token",
-  "expires_in_seconds": 86400
+  "resume_token_expires_in_seconds": 86400
+}
+```
+
+Server → Client (failure)
+
+``` json
+{
+  "type": "ERROR",
+  "code": "AUTH_FAILED",
+  "message": "invalid or expired auth token"
 }
 ```
 
 ------------------------------------------------------------------------
 
 ## 6.3 ATTACH
+
+Client → Server
 
 ``` json
 {
@@ -158,15 +184,36 @@ Server → Client (success)
 }
 ```
 
+Server → Client (success)
+
+``` json
+{
+  "type": "ATTACH_OK",
+  "session_id": "uuid"
+}
+```
+
 ------------------------------------------------------------------------
 
 ## 6.4 RESUME
+
+Client → Server
 
 ``` json
 {
   "type": "RESUME",
   "session_id": "uuid",
   "resume_token": "base64-token"
+}
+```
+
+Server → Client (success)
+
+``` json
+{
+  "type": "RESUME_OK",
+  "session_id": "uuid",
+  "replay_bytes": 1234
 }
 ```
 
@@ -202,6 +249,39 @@ Server → Client (success)
 }
 ```
 
+## 6.8 PING / PONG
+
+Either direction may send:
+
+``` json
+{
+  "type": "PING",
+  "nonce": "opaque-id"
+}
+```
+
+Peer MUST reply:
+
+``` json
+{
+  "type": "PONG",
+  "nonce": "opaque-id"
+}
+```
+
+## 6.9 ERROR
+
+Either direction may send:
+
+``` json
+{
+  "type": "ERROR",
+  "code": "PROTOCOL_ERROR",
+  "message": "human-readable detail",
+  "retryable": false
+}
+```
+
 ------------------------------------------------------------------------
 
 # 7. Session Semantics
@@ -214,7 +294,18 @@ Session states:
 -   EXPIRED
 -   TERMINATED
 
-Default timeout: 600 seconds.
+Rules:
+
+-   After AUTH_OK, session enters CREATED.
+-   ATTACH_OK or RESUME_OK moves session to ATTACHED.
+-   DETACH moves session to DETACHED.
+-   No control/data activity for `session_timeout_seconds` moves to EXPIRED.
+-   CLOSE moves session to TERMINATED.
+
+Timeout definitions:
+
+-   `session_timeout_seconds` controls detached-session inactivity timeout.
+-   `resume_token_expires_in_seconds` controls resume token validity.
 
 ------------------------------------------------------------------------
 
@@ -222,8 +313,12 @@ Default timeout: 600 seconds.
 
 Server MUST maintain a ring buffer.
 
-On RESUME: - Server MAY replay recent output - Replay MUST occur before
-live stream resumes
+On RESUME:
+
+-   If client and server both advertise `resume-v1`, server MUST replay
+    available buffered output.
+-   Replay MUST complete before live stream resumes.
+-   `RESUME_OK.replay_bytes` reports replayed byte count.
 
 ------------------------------------------------------------------------
 
@@ -235,6 +330,9 @@ live stream resumes
 -   ATTACH_DENIED
 -   PROTOCOL_ERROR
 -   INTERNAL_ERROR
+
+When a request fails, server MUST reply with ERROR using one of these
+codes.
 
 ------------------------------------------------------------------------
 
