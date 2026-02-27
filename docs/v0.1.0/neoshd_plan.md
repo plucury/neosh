@@ -86,6 +86,55 @@ Deliverables:
 - `TerminalRuntime`: PTY spawn, resize, stdin/stdout transport.
 - `ReplayBuffer`: ring buffer append/replay.
 
+## Opaque Token Implementation (neoshd)
+
+### Token Record Schema
+
+- `token_hash`: SHA-256 of raw token string (never persist raw token).
+- `token_type`: `auth_token` or `resume_token`.
+- `session_id`: target session binding.
+- `user_id`: bound authenticated user.
+- `jti`: unique random id for replay detection.
+- `expires_at`: absolute expiration timestamp (UTC).
+- `consumed_at`: set when token is consumed (for single-use auth token).
+- `revoked_at`: set when token is revoked.
+- `created_at`: creation timestamp.
+
+### Generation
+
+- Raw token bytes: 32 bytes from CSPRNG.
+- Encode for transport: URL-safe base64 without padding.
+- Persist only `token_hash`; raw token only returned once to caller.
+- `auth_token` TTL: 30-60 seconds.
+- `resume_token` TTL: configurable, default 24 hours.
+
+### Validation Rules
+
+- Common checks: exists, not expired, not revoked, session/user binding match.
+- `AUTH` (`auth_token`):
+  - MUST be single-use.
+  - Use atomic compare-and-set from `consumed_at = NULL` to now.
+  - CAS failure means replay/duplicate use -> `ERROR(AUTH_FAILED)`.
+- `RESUME` (`resume_token`):
+  - Multi-use by default until expiry/revocation.
+  - If token rotation enabled, issue new token on `RESUME_OK` and revoke old token.
+
+### Storage and Cleanup
+
+- Default backend: in-memory map + periodic sweeper.
+- Optional backend: Redis/SQLite via `TokenStore` interface.
+- Sweeper interval: 60s.
+- Cleanup criteria: `expires_at < now` OR `revoked_at IS NOT NULL` older than retention window.
+- Retain consumed `auth_token` rows for short audit window (for replay forensics).
+
+### Security Controls
+
+- Constant-time hash comparison on lookup path.
+- Rate-limit failed `AUTH` and `RESUME` per source IP/session_id.
+- Structured audit log fields:
+  - `event`: `token_issued`/`token_consumed`/`token_rejected`/`token_revoked`
+  - `token_type`, `session_id`, `user_id`, `reason`, `remote_addr`
+
 ## Test Plan
 
 ### Protocol Tests
@@ -94,6 +143,7 @@ Deliverables:
 - Unknown message type -> `ERROR(PROTOCOL_ERROR)`.
 - `AUTH` success/failure.
 - `AUTH` fails on expired/consumed token.
+- `AUTH` concurrent double-submit: only one succeeds (CAS semantics).
 - `ATTACH` and `RESUME` success/failure combinations.
 - Data stream before attach/resume must be rejected.
 
@@ -103,6 +153,7 @@ Deliverables:
 - Timeout expiry behavior.
 - Resume token expiration and revocation.
 - Resume token `session_id` mismatch rejection.
+- Resume token rotation invalidates previous token when enabled.
 
 ### Replay Tests
 
