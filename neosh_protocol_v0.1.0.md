@@ -119,7 +119,7 @@ Server → Client
 {
   "type": "HELLO_ACK",
   "protocol_version": "0.1.0",
-  "server_version": "neosh-agent/0.1.0",
+  "server_version": "neoshd/0.1.0",
   "capabilities": ["stdin-bytes", "resume-v1"],
   "session_timeout_seconds": 600
 }
@@ -145,7 +145,7 @@ Client → Server
 {
   "type": "AUTH",
   "method": "ssh-token",
-  "token": "base64-token"
+  "token": "opaque-token"
 }
 ```
 
@@ -155,7 +155,7 @@ Server → Client (success)
 {
   "type": "AUTH_OK",
   "session_id": "uuid",
-  "resume_token": "base64-token",
+  "resume_token": "opaque-token",
   "resume_token_expires_in_seconds": 86400
 }
 ```
@@ -203,7 +203,7 @@ Client → Server
 {
   "type": "RESUME",
   "session_id": "uuid",
-  "resume_token": "base64-token"
+  "resume_token": "opaque-token"
 }
 ```
 
@@ -306,6 +306,7 @@ Timeout definitions:
 
 -   `session_timeout_seconds` controls detached-session inactivity timeout.
 -   `resume_token_expires_in_seconds` controls resume token validity.
+-   `auth_token` is single-use and only valid for `AUTH`.
 
 ------------------------------------------------------------------------
 
@@ -354,6 +355,31 @@ Future capabilities must be ignored if unsupported.
 -   Resume tokens must be revocable
 -   TLS encryption mandatory
 -   Server certificate must be validated (TOFU or CA)
+
+## 11.1 Token Format
+
+`auth_token` and `resume_token` are opaque tokens. Their internal format is
+implementation-defined and not parsed by clients.
+
+## 11.2 auth_token Issuance and Validation
+
+-   `auth_token` is issued during SSH bootstrap together with `session_id`.
+-   Server MUST bind token record to `session_id`, `user_id`, `expires_at`,
+    and unique `jti`.
+-   Server MUST reject expired token and return `ERROR(AUTH_FAILED)`.
+-   Server MUST mark `auth_token` as consumed after successful `AUTH`.
+-   Reuse of consumed `auth_token` MUST return `ERROR(AUTH_FAILED)`.
+
+## 11.3 resume_token Issuance and Validation
+
+-   On `AUTH_OK`, server MUST issue a revocable opaque `resume_token`.
+-   Server MUST store token record with `session_id`, `user_id`,
+    `expires_at`, `jti`, and `revoked` flag.
+-   On `RESUME`, server MUST verify token exists, is not revoked, is not
+    expired, and matches `session_id`.
+-   Invalid or expired `resume_token` MUST return `ERROR(SESSION_EXPIRED)` or
+    `ERROR(AUTH_FAILED)` by implementation policy.
+-   Server MAY rotate `resume_token` on successful resume.
 
 ------------------------------------------------------------------------
 

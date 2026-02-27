@@ -16,7 +16,7 @@ sequenceDiagram
 
     Note over C,SSH: Bootstrap over SSH
     C->>SSH: SSH login
-    C->>SSH: start neosh-agent (new session)
+    C->>SSH: start neoshd (new session)
     SSH-->>C: session_id + auth_token (short-lived)
 
     Note over C,S: QUIC + TLS 1.3 (ALPN neosh/1)
@@ -67,3 +67,9 @@ sequenceDiagram
         Note over S: session -> TERMINATED
     end
 ```
+
+## Token Semantics (v0.1.0)
+
+- `auth_token`: opaque, short-lived, single-use, only for `AUTH`.
+- `resume_token`: opaque, revocable, used only for `RESUME`.
+- If `auth_token` expires before `AUTH`, client must run SSH bootstrap again.
