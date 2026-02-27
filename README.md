@@ -80,5 +80,5 @@ sequenceDiagram
 - SSH bootstrap response MUST include QUIC address and certificate fingerprint.
 - Returned `quic_addr` MUST be client-routable for that session.
 - `neosh` MUST pin and verify fingerprint on first QUIC handshake in that session.
-- `neoshd` default bind policy follows mosh-style behavior (`bind-server=ssh`,
+- `neoshd` default bind policy follows SSH-bootstrap bind policy (`bind-server=ssh`,
   port range `30000-39999`).

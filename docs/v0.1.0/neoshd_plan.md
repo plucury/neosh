@@ -12,7 +12,7 @@ Implement `neoshd` (remote session process) compatible with
 
 Binary role:
 
-- `neoshd`: session-scoped server process started over SSH (mosh-style).
+- `neoshd`: session-scoped server process started over SSH.
 - Accepts QUIC connections from `neosh` CLI.
 
 ## Milestones
@@ -20,7 +20,7 @@ Binary role:
 ### M1: Transport and Handshake Skeleton
 
 - Stand up QUIC listener with ALPN `neosh/1` and TLS 1.3.
-- Implement mosh-style bind defaults (`bind-server=ssh`, port range `30000-39999`).
+- Implement SSH-bootstrap bind defaults (`bind-server=ssh`, port range `30000-39999`).
 - Enforce one control stream per connection.
 - Parse length-prefixed JSON control frames.
 - Implement `HELLO` -> `HELLO_ACK`.

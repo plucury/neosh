@@ -68,7 +68,7 @@ neoshd/
 
 Purpose:
 
-- mosh-style SSH entrypoint.
+- SSH-bootstrap session entrypoint.
 - create one new session, print bootstrap metadata, then keep serving that
   session in foreground until close/timeout.
 
@@ -95,7 +95,7 @@ All flags optional with defaults:
 
 Port allocation policy for `neoshd new`:
 
-- default port search range is `30000-39999` (mosh-style).
+- default port search range is `30000-39999`.
 - default `--bind-server=ssh` means bind address is selected from the SSH
   connection endpoint (server address used by SSH session).
 - if no port is available in range, startup MUST fail with a structured error.
