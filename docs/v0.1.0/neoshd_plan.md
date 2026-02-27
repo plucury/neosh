@@ -36,6 +36,10 @@ Deliverables:
 
 - Implement `AUTH(method=ssh-token)`.
 - Integrate SSH bootstrap token validator (pluggable interface).
+- Implement SSH bootstrap issuance interfaces:
+  - `neoshd new` for new session bootstrap.
+  - `neoshd renew-auth --session-id <uuid>` for reconnect bootstrap.
+- Enforce SSH user ownership check for `renew-auth`.
 - On success emit `AUTH_OK(session_id, resume_token, resume_token_expires_in_seconds)`.
 - Maintain session state machine: `CREATED`, `ATTACHED`, `DETACHED`, `EXPIRED`, `TERMINATED`.
 - Enforce timeout policy from `session_timeout_seconds`.
@@ -45,6 +49,8 @@ Deliverables:
 Deliverables:
 
 - Auth service abstraction (`validateAuthToken`, `issueResumeToken`).
+- SSH bootstrap command handlers (`new`, `renew-auth`) returning
+  `session_id + auth_token + quic_addr + cert_fingerprint`.
 - In-memory session registry with TTL and transitions.
 - Structured `ERROR` responses (`AUTH_FAILED`, `SESSION_NOT_FOUND`, etc).
 - Token repository interface with revocation and expiry index.
@@ -143,6 +149,8 @@ Deliverables:
 - `AUTH` success/failure.
 - `AUTH` fails on expired/consumed token.
 - `AUTH` concurrent double-submit: only one succeeds (CAS semantics).
+- `renew-auth` requires matching SSH user/session ownership.
+- `renew-auth` issued `auth_token` is single-use in `AUTH`.
 - `ATTACH` and `RESUME` success/failure combinations.
 - Data stream before attach/resume must be rejected.
 

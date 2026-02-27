@@ -62,6 +62,17 @@ sequenceDiagram
         Note over S: session -> DETACHED (can resume before timeout)
     end
 
+    opt reconnect and resume
+        C->>SSH: run `neoshd renew-auth --session-id <uuid> --user $USER`
+        SSH-->>C: session_id + auth_token + quic_addr + cert_fingerprint
+        C->>S: HELLO(protocol_version, capabilities)
+        S-->>C: HELLO_ACK(protocol_version, capabilities, session_timeout_seconds)
+        C->>S: AUTH(method=ssh-token, token=auth_token)
+        S-->>C: AUTH_OK(session_id, resume_token, resume_token_expires_in_seconds)
+        C->>S: RESUME(session_id, resume_token)
+        S-->>C: RESUME_OK(session_id, replay_bytes)
+    end
+
     opt terminate
         C->>S: CLOSE
         Note over S: session -> TERMINATED
@@ -73,6 +84,8 @@ sequenceDiagram
 - `auth_token`: opaque, short-lived, single-use, only for `AUTH`.
 - `resume_token`: opaque, revocable, used only for `RESUME`.
 - If `auth_token` expires before `AUTH`, client must run SSH bootstrap again.
+- For reconnect/resume on a new QUIC connection, client must run SSH
+  `renew-auth` to get a fresh `auth_token`, then perform `AUTH` before `RESUME`.
 
 ## TLS Trust Bootstrap (v0.1.0)
 

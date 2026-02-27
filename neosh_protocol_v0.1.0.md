@@ -374,8 +374,11 @@ implementation-defined and not parsed by clients.
 -   Server MUST reject expired token and return `ERROR(AUTH_FAILED)`.
 -   Server MUST mark `auth_token` as consumed after successful `AUTH`.
 -   Reuse of consumed `auth_token` MUST return `ERROR(AUTH_FAILED)`.
+-   For reconnect/resume on a new QUIC connection, server MUST support
+    SSH-side re-issuance of `auth_token` for an existing `session_id`
+    (e.g. `renew-auth` command), with the same single-use semantics.
 
-## 11.4 TLS Certificate Bootstrap
+## 11.3 TLS Certificate Bootstrap
 
 -   `neoshd` MUST auto-generate a TLS certificate/key if not already present.
 -   Generated certs MAY be ephemeral per process or persisted locally by
@@ -384,8 +387,10 @@ implementation-defined and not parsed by clients.
     (SHA-256 over DER cert).
 -   Client MUST verify QUIC peer cert fingerprint matches bootstrap value
     before sending `AUTH`.
+-   For a given `session_id`, certificate fingerprint MUST remain stable for
+    the session lifetime (until `TERMINATED` or `EXPIRED`).
 
-## 11.3 resume_token Issuance and Validation
+## 11.4 resume_token Issuance and Validation
 
 -   On `AUTH_OK`, server MUST issue a revocable opaque `resume_token`.
 -   Server MUST store token record with `session_id`, `user_id`,

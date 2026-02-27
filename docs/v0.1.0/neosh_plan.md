@@ -49,7 +49,7 @@ Deliverables:
 ### M3: Attach/Resume and Terminal Wiring
 
 - Fresh path: `ATTACH` -> `ATTACH_OK`.
-- Resume path: `RESUME` -> `RESUME_OK`.
+- Resume path (post-`AUTH`): `RESUME` -> `RESUME_OK`.
 - Open `STDIN` and `STDOUT` streams only after attach/resume success.
 - Forward local keystrokes to `STDIN`.
 - Render `STDOUT` bytes to local terminal.
@@ -65,7 +65,10 @@ Deliverables:
 
 - Implement user-triggered `DETACH`.
 - Preserve reconnect metadata (`session_id`, `resume_token`, expiry).
-- Reconnect with exponential backoff and `RESUME`.
+- Reconnect flow must obtain fresh single-use `auth_token` via SSH
+  `neoshd renew-auth --session-id <uuid> --user "$USER"`, then run
+  `HELLO` -> `AUTH` -> `RESUME`.
+- Reconnect with exponential backoff around the above resume flow.
 - Implement `PING`/`PONG` keepalive behavior.
 - Handle `CLOSE` and termination cleanup.
 - If initial `AUTH` fails due to expired token, trigger SSH bootstrap to fetch a new token.
@@ -88,7 +91,8 @@ Deliverables:
 Transition guards:
 
 - No data stream operations before `ATTACH_OK` or `RESUME_OK`.
-- Resume only if local token is present and not expired.
+- Resume only if local `resume_token` is present/not expired and a fresh
+  `auth_token` is obtained via SSH `renew-auth`.
 - Never reuse `auth_token` after any `AUTH` attempt.
 
 ## Test Plan
@@ -106,6 +110,7 @@ Transition guards:
 - End-to-end attach and interactive command execution.
 - Detach then resume within timeout.
 - Resume failure on expired token.
+- Resume requires SSH `renew-auth` and performs `AUTH` before `RESUME`.
 - Initial auth failure on expired/consumed bootstrap token.
 - Resize propagation to server PTY.
 
@@ -118,6 +123,7 @@ Transition guards:
 ## Acceptance Criteria
 
 - Client can bootstrap, authenticate, attach, and run an interactive shell.
-- Client can detach and resume successfully before timeout.
+- Client can detach and resume successfully before timeout using
+  SSH `renew-auth` + `AUTH` + `RESUME`.
 - Protocol errors are surfaced clearly without undefined states.
 - Keepalive and reconnect do not violate protocol ordering.

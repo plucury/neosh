@@ -85,7 +85,7 @@ neoshd new --user "$USER"
 All flags optional with defaults:
 
 - `--port-range` (default: `30000:39999`): QUIC UDP port allocation range.
-- `--bind-server` (default: `ssh`): bind address policy (`ssh` or `any`).
+- `--bind-server` (default: `ssh`): bind address policy (`ssh`, `any`, or explicit `<ip-or-host>`).
 - `--tls-cert` (default: empty): TLS cert file path override.
 - `--tls-key` (default: empty): TLS key file path override.
 - `--session-timeout` (default: `600`): detached-session timeout in seconds.
@@ -98,7 +98,10 @@ Port allocation policy for `neoshd new`:
 - default port search range is `30000-39999`.
 - default `--bind-server=ssh` means bind address is selected from the SSH
   connection endpoint (server address used by SSH session).
+- `--bind-server=any` means bind wildcard address (`0.0.0.0` and/or `::`).
+- `--bind-server=<ip-or-host>` means bind the explicitly provided address.
 - if no port is available in range, startup MUST fail with a structured error.
+- invalid `--bind-server` value MUST fail fast with a structured config error.
 - returned `quic_addr` is the source of truth; client MUST always use returned
   address, not assumed defaults.
 - returned `quic_addr` MUST be client-routable for this session (the client
@@ -109,6 +112,8 @@ TLS behavior in v0.1.0:
 - if `--tls-cert/--tls-key` are missing, `neoshd` MUST auto-generate a self-signed cert.
 - generated cert/key are kept in process runtime memory and used for bootstrap fingerprint pinning.
 - if only one of `--tls-cert` or `--tls-key` is provided, startup MUST fail with config error.
+- certificate fingerprint MUST remain stable for the lifetime of a given
+  `session_id` (from `new` until `TERMINATED/EXPIRED`).
 
 Success output (stdout JSON):
 
@@ -147,6 +152,39 @@ Expected output:
 
 - `neoshd/0.1.0`
 
+### `neoshd renew-auth`
+
+Purpose:
+
+- issue a fresh single-use `auth_token` for an existing session to support
+  reconnect/resume on a new QUIC connection.
+
+Example:
+
+```bash
+neoshd renew-auth --session-id <uuid> --user "$USER"
+```
+
+Success output (stdout JSON):
+
+```json
+{
+  "session_id": "uuid",
+  "auth_token": "opaque-token",
+  "auth_token_expires_in_seconds": 60,
+  "quic_addr": "203.0.113.10:30001",
+  "cert_fingerprint": "sha256:ab12cd34..."
+}
+```
+
+Rules:
+
+- server MUST verify SSH-authenticated user owns `session_id`.
+- returned `quic_addr`/`cert_fingerprint` MUST reflect current active listener.
+- token is single-use and consumed by next successful `AUTH`.
+- for active sessions, `cert_fingerprint` returned by `renew-auth` MUST equal
+  the fingerprint originally issued for that `session_id`.
+
 ## Protocol Implementation
 
 ### 0. Bootstrap Token Issuance Interface
@@ -156,6 +194,7 @@ Expected output:
 Recommended interface:
 
 - `neoshd new` subcommand (invoked over SSH).
+- `neoshd renew-auth --session-id <uuid>` subcommand (invoked over SSH).
 - Input context from SSH session/user identity.
 - Output JSON (stdout) with:
   - `session_id`
@@ -166,14 +205,20 @@ Recommended interface:
 
 Behavior:
 
-- create a new session owned by SSH-authenticated user
-- issue single-use opaque `auth_token` bound to `session_id + user_id`
-- persist token record before returning response
+- `neoshd new`:
+  - create a new session owned by SSH-authenticated user
+  - issue single-use opaque `auth_token` bound to `session_id + user_id`
+  - persist token record before returning response
+- `neoshd renew-auth`:
+  - MUST NOT create a new `session_id`
+  - MUST issue a fresh single-use opaque `auth_token` for existing `session_id`
+  - MUST verify SSH-authenticated user owns target session before issuance
+  - MUST persist token record before returning response
 
 Session/process policy in v0.1.0:
 
-- each bootstrap invocation MUST create a new `session_id`
-- bootstrap MUST NOT reuse existing sessions
+- each `neoshd new` invocation MUST create a new `session_id`
+- `neoshd renew-auth` MUST reuse the provided existing `session_id`
 - bootstrap MUST return active QUIC address and cert fingerprint for pin validation
 - bootstrap MUST ensure returned `quic_addr` is client-routable for this session
 - one `neoshd new` process serves one session and exits on close/timeout
@@ -449,8 +494,10 @@ Race safety requirements:
 8. `neosh` sends `ATTACH` (or later `RESUME`)
 9. `neoshd` replies `ATTACH_OK` / `RESUME_OK`
 10. stdin/stdout streams start
-11. optional `DETACH` then reconnect with `RESUME`
-12. `CLOSE` or timeout ends session
+11. optional `DETACH`
+12. reconnect path: SSH `neoshd renew-auth --session-id <uuid>` to get fresh `auth_token`
+13. reconnect path: QUIC `HELLO` -> `AUTH` -> `RESUME`
+14. `CLOSE` or timeout ends session
 
 ## Implementation Order
 
