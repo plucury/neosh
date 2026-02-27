@@ -11,7 +11,13 @@ neosh is a QUIC-based remote terminal protocol.
 sequenceDiagram
     autonumber
     participant C as Client
+    participant SSH as SSH Daemon
     participant S as Server
+
+    Note over C,SSH: Bootstrap over SSH
+    C->>SSH: SSH login
+    C->>SSH: start neosh-agent (new session)
+    SSH-->>C: session_id + auth_token (short-lived)
 
     Note over C,S: QUIC + TLS 1.3 (ALPN neosh/1)
 
@@ -23,7 +29,7 @@ sequenceDiagram
         S-->>C: HELLO_ACK(protocol_version, capabilities, session_timeout_seconds)
     end
 
-    C->>S: AUTH(method=ssh-token, token)
+    C->>S: AUTH(method=ssh-token, token=auth_token)
     alt auth failed
         S-->>C: ERROR(AUTH_FAILED)
         S--xC: close connection
