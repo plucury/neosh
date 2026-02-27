@@ -2,7 +2,7 @@
 
 ## Scope
 
-Implement `neoshd` (remote daemon) compatible with
+Implement `neoshd` (remote session process) compatible with
 `neosh_protocol_v0.1.0.md`:
 
 - One QUIC connection carries exactly one logical session.
@@ -12,7 +12,7 @@ Implement `neoshd` (remote daemon) compatible with
 
 Binary role:
 
-- `neoshd`: long-running server process for session lifecycle and PTY runtime.
+- `neoshd`: session-scoped server process started over SSH (mosh-style).
 - Accepts QUIC connections from `neosh` CLI.
 
 ## Milestones
@@ -20,6 +20,7 @@ Binary role:
 ### M1: Transport and Handshake Skeleton
 
 - Stand up QUIC listener with ALPN `neosh/1` and TLS 1.3.
+- Implement mosh-style bind defaults (`bind-server=ssh`, port range `30000-39999`).
 - Enforce one control stream per connection.
 - Parse length-prefixed JSON control frames.
 - Implement `HELLO` -> `HELLO_ACK`.
@@ -68,7 +69,7 @@ Deliverables:
 - On resume with negotiated `resume-v1`, replay buffered output before live output.
 - Fill `RESUME_OK.replay_bytes`.
 - Implement `PING`/`PONG`.
-- Add rate limiting and payload size guards.
+- Add payload size and message-order guards.
 
 Deliverables:
 
@@ -122,7 +123,6 @@ Deliverables:
 ### Storage and Cleanup
 
 - Default backend: in-memory map + periodic sweeper.
-- Optional backend: Redis/SQLite via `TokenStore` interface.
 - Sweeper interval: 60s.
 - Cleanup criteria: `expires_at < now` OR `revoked_at IS NOT NULL` older than retention window.
 - Retain consumed `auth_token` rows for short audit window (for replay forensics).
@@ -130,7 +130,6 @@ Deliverables:
 ### Security Controls
 
 - Constant-time hash comparison on lookup path.
-- Rate-limit failed `AUTH` and `RESUME` per source IP/session_id.
 - Structured audit log fields:
   - `event`: `token_issued`/`token_consumed`/`token_rejected`/`token_revoked`
   - `token_type`, `session_id`, `user_id`, `reason`, `remote_addr`

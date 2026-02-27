@@ -2,7 +2,7 @@
 
 ## Goal
 
-Build `neoshd` as a QUIC-based remote terminal daemon implementing
+Build `neoshd` as a QUIC-based remote terminal session server implementing
 `neosh_protocol_v0.1.0.md` with:
 
 - one QUIC connection per logical session
@@ -62,6 +62,91 @@ neoshd/
     log.*
 ```
 
+## neoshd CLI Commands (v0.1.0)
+
+### `neoshd new`
+
+Purpose:
+
+- mosh-style SSH entrypoint.
+- create one new session, print bootstrap metadata, then keep serving that
+  session in foreground until close/timeout.
+
+Expected invocation:
+
+- called over SSH after user authentication.
+
+Example:
+
+```bash
+neoshd new --user "$USER"
+```
+
+All flags optional with defaults:
+
+- `--port-range` (default: `30000:39999`): QUIC UDP port allocation range.
+- `--bind-server` (default: `ssh`): bind address policy (`ssh` or `any`).
+- `--tls-cert` (default: empty): TLS cert file path override.
+- `--tls-key` (default: empty): TLS key file path override.
+- `--session-timeout` (default: `600`): detached-session timeout in seconds.
+- `--auth-token-ttl` (default: `60`): bootstrap auth token TTL in seconds.
+- `--resume-token-ttl` (default: `86400`): resume token TTL in seconds.
+- `--replay-buffer-bytes` (default: `1048576`): replay ring buffer size in bytes.
+
+Port allocation policy for `neoshd new`:
+
+- default port search range is `30000-39999` (mosh-style).
+- default `--bind-server=ssh` means bind address is selected from the SSH
+  connection endpoint (server address used by SSH session).
+- if no port is available in range, startup MUST fail with a structured error.
+- returned `quic_addr` is the source of truth; client MUST always use returned
+  address, not assumed defaults.
+- returned `quic_addr` MUST be client-routable for this session (the client
+  must be able to dial it directly on the intended QUIC path).
+
+TLS behavior in v0.1.0:
+
+- if `--tls-cert/--tls-key` are missing, `neoshd` MUST auto-generate a self-signed cert.
+- generated cert/key are kept in process runtime memory and used for bootstrap fingerprint pinning.
+- if only one of `--tls-cert` or `--tls-key` is provided, startup MUST fail with config error.
+
+Success output (stdout JSON):
+
+```json
+{
+  "session_id": "uuid",
+  "auth_token": "opaque-token",
+  "auth_token_expires_in_seconds": 60,
+  "quic_addr": "203.0.113.10:30001",
+  "cert_fingerprint": "sha256:ab12cd34..."
+}
+```
+
+After printing JSON, process continues running and serves this session.
+`quic_addr` MUST be reachable by the client connection path.
+
+Failure behavior:
+
+- non-zero exit code.
+- stdout/stderr returns structured error JSON.
+- must not print partial token material.
+
+### `neoshd version`
+
+Purpose:
+
+- print daemon version for interoperability checks.
+
+Example:
+
+```bash
+neoshd version
+```
+
+Expected output:
+
+- `neoshd/0.1.0`
+
 ## Protocol Implementation
 
 ### 0. Bootstrap Token Issuance Interface
@@ -70,12 +155,14 @@ neoshd/
 
 Recommended interface:
 
-- `neoshd bootstrap` subcommand (invoked over SSH).
+- `neoshd new` subcommand (invoked over SSH).
 - Input context from SSH session/user identity.
 - Output JSON (stdout) with:
   - `session_id`
   - `auth_token`
   - `auth_token_expires_in_seconds`
+  - `quic_addr`
+  - `cert_fingerprint` (SHA-256 over DER cert)
 
 Behavior:
 
@@ -83,10 +170,13 @@ Behavior:
 - issue single-use opaque `auth_token` bound to `session_id + user_id`
 - persist token record before returning response
 
-Session policy in v0.1.0:
+Session/process policy in v0.1.0:
 
 - each bootstrap invocation MUST create a new `session_id`
 - bootstrap MUST NOT reuse existing sessions
+- bootstrap MUST return active QUIC address and cert fingerprint for pin validation
+- bootstrap MUST ensure returned `quic_addr` is client-routable for this session
+- one `neoshd new` process serves one session and exits on close/timeout
 
 Failure:
 
@@ -103,6 +193,7 @@ Failure:
    - `AUTH` -> `AUTH_OK`
    - `ATTACH` or `RESUME` -> `ATTACH_OK` or `RESUME_OK`
 5. Reject out-of-order requests with `ERROR(PROTOCOL_ERROR)`.
+6. Client must complete certificate fingerprint pin verification before `AUTH`.
 
 ### 2. Control Message Dispatcher
 
@@ -303,15 +394,17 @@ Recommended code mapping:
 
 Minimum config keys:
 
-- `listen_addr`
-- `tls_cert_file`
-- `tls_key_file`
+- `listen_addr` (derived from `bind_server` + selected port from `port_range`)
+- `port_range` (default `30000:39999`)
+- `bind_server` (default `ssh`)
+- `tls_cert_file` (default empty; auto-generate when empty with key)
+- `tls_key_file` (default empty; auto-generate when empty with cert)
 - `alpn` (default `neosh/1`)
-- `session_timeout_seconds` (default 600)
-- `auth_token_ttl_seconds` (default 60)
-- `resume_token_ttl_seconds` (default 86400)
-- `replay_buffer_bytes` (default 1048576)
-- `token_rotation_on_resume` (default false)
+- `session_timeout_seconds` (default `600`)
+- `auth_token_ttl_seconds` (default `60`)
+- `resume_token_ttl_seconds` (default `86400`)
+- `replay_buffer_bytes` (default `1048576`)
+- `token_rotation_on_resume` (default `false`)
 
 ## Observability (Logs Only)
 
@@ -346,16 +439,18 @@ Race safety requirements:
 
 ## End-to-End Flow (Reference)
 
-1. `neosh` bootstrap via SSH gets `session_id + auth_token`
-2. `neosh` connects QUIC and sends `HELLO`
-3. `neoshd` replies `HELLO_ACK`
-4. `neosh` sends `AUTH(auth_token)`
-5. `neoshd` validates and consumes token, replies `AUTH_OK(resume_token)`
-6. `neosh` sends `ATTACH` (or later `RESUME`)
-7. `neoshd` replies `ATTACH_OK` / `RESUME_OK`
-8. stdin/stdout streams start
-9. optional `DETACH` then reconnect with `RESUME`
-10. `CLOSE` or timeout ends session
+1. `neosh` bootstrap via SSH gets `session_id + auth_token + quic_addr + cert_fingerprint`
+2. `neosh` connects QUIC to `quic_addr`
+3. `neosh` verifies peer cert fingerprint matches bootstrap value
+4. `neosh` sends `HELLO`
+5. `neoshd` replies `HELLO_ACK`
+6. `neosh` sends `AUTH(auth_token)`
+7. `neoshd` validates and consumes token, replies `AUTH_OK(resume_token)`
+8. `neosh` sends `ATTACH` (or later `RESUME`)
+9. `neoshd` replies `ATTACH_OK` / `RESUME_OK`
+10. stdin/stdout streams start
+11. optional `DETACH` then reconnect with `RESUME`
+12. `CLOSE` or timeout ends session
 
 ## Implementation Order
 

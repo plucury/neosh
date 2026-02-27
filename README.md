@@ -16,8 +16,8 @@ sequenceDiagram
 
     Note over C,SSH: Bootstrap over SSH
     C->>SSH: SSH login
-    C->>SSH: start neoshd (new session)
-    SSH-->>C: session_id + auth_token (short-lived)
+    C->>SSH: run `neoshd new --user $USER`
+    SSH-->>C: session_id + auth_token + quic_addr + cert_fingerprint
 
     Note over C,S: QUIC + TLS 1.3 (ALPN neosh/1)
 
@@ -73,3 +73,12 @@ sequenceDiagram
 - `auth_token`: opaque, short-lived, single-use, only for `AUTH`.
 - `resume_token`: opaque, revocable, used only for `RESUME`.
 - If `auth_token` expires before `AUTH`, client must run SSH bootstrap again.
+
+## TLS Trust Bootstrap (v0.1.0)
+
+- `neoshd` auto-generates (or loads) TLS cert/key at bootstrap time.
+- SSH bootstrap response MUST include QUIC address and certificate fingerprint.
+- Returned `quic_addr` MUST be client-routable for that session.
+- `neosh` MUST pin and verify fingerprint on first QUIC handshake in that session.
+- `neoshd` default bind policy follows mosh-style behavior (`bind-server=ssh`,
+  port range `30000-39999`).

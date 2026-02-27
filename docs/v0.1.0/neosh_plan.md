@@ -19,9 +19,10 @@ Binary role:
 
 ### M1: Bootstrap and Connection Setup
 
-- Implement SSH bootstrap command execution to start `neoshd`.
-- Parse bootstrap response (`session_id`, `auth_token`).
+- Implement SSH bootstrap command execution to start `neoshd new`.
+- Parse bootstrap response (`session_id`, `auth_token`, `quic_addr`, `cert_fingerprint`).
 - Establish QUIC connection with TLS 1.3 and ALPN `neosh/1`.
+- Pin and verify server certificate fingerprint from bootstrap before `AUTH`.
 - Open control stream and implement frame codec (length-prefixed JSON).
 
 Deliverables:

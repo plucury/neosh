@@ -299,7 +299,7 @@ Rules:
 -   After AUTH_OK, session enters CREATED.
 -   ATTACH_OK or RESUME_OK moves session to ATTACHED.
 -   DETACH moves session to DETACHED.
--   No control/data activity for `session_timeout_seconds` moves to EXPIRED.
+-   Detached-session inactivity for `session_timeout_seconds` moves to EXPIRED.
 -   CLOSE moves session to TERMINATED.
 
 Timeout definitions:
@@ -364,11 +364,26 @@ implementation-defined and not parsed by clients.
 ## 11.2 auth_token Issuance and Validation
 
 -   `auth_token` is issued during SSH bootstrap together with `session_id`.
+-   SSH bootstrap MUST also return `quic_addr` and server certificate
+    fingerprint for this session.
+-   `quic_addr` MUST be client-routable for the current session. It MUST be an
+    address/port that the client can dial directly on its intended QUIC path
+    (without relying on implementation-specific local assumptions).
 -   Server MUST bind token record to `session_id`, `user_id`, `expires_at`,
     and unique `jti`.
 -   Server MUST reject expired token and return `ERROR(AUTH_FAILED)`.
 -   Server MUST mark `auth_token` as consumed after successful `AUTH`.
 -   Reuse of consumed `auth_token` MUST return `ERROR(AUTH_FAILED)`.
+
+## 11.4 TLS Certificate Bootstrap
+
+-   `neoshd` MUST auto-generate a TLS certificate/key if not already present.
+-   Generated certs MAY be ephemeral per process or persisted locally by
+    implementation policy.
+-   During SSH bootstrap, server MUST return certificate fingerprint
+    (SHA-256 over DER cert).
+-   Client MUST verify QUIC peer cert fingerprint matches bootstrap value
+    before sending `AUTH`.
 
 ## 11.3 resume_token Issuance and Validation
 
