@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-cli:
     strategy:
       fail-fast: false
       matrix:
@@ -62,20 +62,68 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build-ios-client-c-lib:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Add iOS Rust targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+
+      - name: Build iOS static libraries
+        run: |
+          cargo build --release --manifest-path ffi/neosh-client-c/Cargo.toml --target-dir target/ffi-client-c --target aarch64-apple-ios
+          cargo build --release --manifest-path ffi/neosh-client-c/Cargo.toml --target-dir target/ffi-client-c --target aarch64-apple-ios-sim
+          cargo build --release --manifest-path ffi/neosh-client-c/Cargo.toml --target-dir target/ffi-client-c --target x86_64-apple-ios
+
+      - name: Create XCFramework
+        run: |
+          mkdir -p dist
+          xcodebuild -create-xcframework \
+            -library target/ffi-client-c/aarch64-apple-ios/release/libneosh_client_c.a -headers ffi/neosh-client-c/include \
+            -library target/ffi-client-c/aarch64-apple-ios-sim/release/libneosh_client_c.a -headers ffi/neosh-client-c/include \
+            -library target/ffi-client-c/x86_64-apple-ios/release/libneosh_client_c.a -headers ffi/neosh-client-c/include \
+            -output dist/neosh_client.xcframework
+          ditto -c -k --sequesterRsrc --keepParent dist/neosh_client.xcframework dist/neosh_client.xcframework.zip
+
+      - name: Upload XCFramework artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: neosh-client-c-ios-xcframework
+          path: dist/neosh_client.xcframework.zip
+          if-no-files-found: error
+          retention-days: 14
+
   publish-release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs:
+      - build-cli
+      - build-ios-client-c-lib
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Download all artifacts
+      - name: Download CLI artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
           pattern: neosh-release-*
           merge-multiple: true
+
+      - name: Download iOS client C artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          name: neosh-client-c-ios-xcframework
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -84,3 +132,4 @@ jobs:
           files: |
             release-assets/neosh-*
             release-assets/neoshd-*
+            release-assets/neosh_client.xcframework.zip
