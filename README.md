@@ -7,13 +7,31 @@
 - Protocol: [`neosh_protocol_v0.1.0.md`](./neosh_protocol_v0.1.0.md)
 - ALPN: `neosh/1`
 
+## neosh vs SSH
+
+| Topic | SSH | neosh |
+| --- | --- | --- |
+| Transport | TCP | QUIC (UDP) |
+| Session continuity on network switch / transient loss | Usually reconnect manually | Built-in detach/resume workflow |
+| Bootstrap | Native SSH | Uses SSH for bootstrap and trust handoff |
+| Long-running remote tasks | Usually use `tmux`/`screen` manually | Session lifecycle is first-class (`detach`, `resume`) |
+| Trust verification | Host key model | Verifies `neoshd` TLS fingerprint from SSH bootstrap before `AUTH` |
+| Interactive latency under unstable networks | Good on stable TCP | Usually better resilience under lossy/mobile links |
+
 ## Why neosh
 
-- Fast interactive shell over QUIC
-- SSH-based bootstrap and identity flow
-- Resumable detached session workflow
-- TLS fingerprint pin verification before `AUTH`
-- Simple CLI for daily use (`connect`, `detach`, `resume`)
+- QUIC-based interactive shell with better tolerance to transient network jitter/loss
+- SSH bootstrap keeps deployment practical in existing SSH environments
+- Built-in resumable detached sessions (no extra multiplexer required for basic workflow)
+- Tokenized auth/resume flow (`auth_token` + `resume_token`) with explicit lifecycle controls
+- Simple operator-facing CLI (`connect`, `detach`, `resume`)
+
+## Best Use Cases
+
+- Mobile or roaming networks where temporary disconnections are common
+- Remote development / ops sessions that should survive client reconnects
+- Multi-hop environments where SSH is already accepted as bootstrap entry point
+- Teams that want a structured resumable session model without relying only on `tmux` conventions
 
 ## Quick Start
 
