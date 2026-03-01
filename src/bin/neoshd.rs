@@ -4,9 +4,11 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use neoshd::protocol::dispatcher::Dispatcher;
 use neoshd::protocol::framing::{decode_frame, encode_frame};
@@ -32,7 +34,8 @@ const MAX_CONTROL_FRAME: usize = 64 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(name = "neoshd")]
-#[command(about = "neoshd v0.1.0")]
+#[command(about = "Start a remote shell backend and issue bootstrap/renew tokens.")]
+#[command(after_help = "Examples:\n  neoshd new --user \"$USER\"\n  neoshd new --user \"$USER\" --bind-server 0.0.0.0 --port-range 30000:39999\n  neoshd renew-auth --session-id 550e8400-e29b-41d4-a716-446655440000 --user \"$USER\"\n  neoshd version")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -40,35 +43,40 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(about = "Create or reuse a session and print bootstrap JSON.")]
     New(NewArgs),
+    #[command(about = "Issue a fresh single-use auth token for an existing session.")]
+    #[command(name = "renew-auth")]
+    #[command(after_help = "Example:\n  neoshd renew-auth --session-id 550e8400-e29b-41d4-a716-446655440000 --user \"$USER\"")]
     RenewAuth {
-        #[arg(long)]
+        #[arg(long, help = "Session ID to renew auth token for")]
         session_id: Uuid,
-        #[arg(long)]
+        #[arg(long, help = "Session owner user name")]
         user: String,
     },
+    #[command(about = "Print server version.")]
     Version,
 }
 
 #[derive(Debug, Parser, Clone)]
 struct NewArgs {
-    #[arg(long)]
+    #[arg(long, help = "Session owner user name")]
     user: String,
-    #[arg(long, default_value = "30000:39999")]
+    #[arg(long, default_value = "30000:39999", help = "UDP port range, format start:end")]
     port_range: String,
-    #[arg(long, default_value = "ssh")]
+    #[arg(long, default_value = "ssh", help = "Host/IP advertised to clients in quic_addr")]
     bind_server: String,
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", help = "Path to TLS certificate PEM (optional)")]
     tls_cert: String,
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", help = "Path to TLS private key PEM (optional)")]
     tls_key: String,
-    #[arg(long, default_value_t = 600)]
+    #[arg(long, default_value_t = 600, help = "Detached session timeout in seconds")]
     session_timeout: u64,
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 60, help = "Auth token TTL in seconds")]
     auth_token_ttl: u64,
-    #[arg(long, default_value_t = 86400)]
+    #[arg(long, default_value_t = 86400, help = "Resume token TTL in seconds")]
     resume_token_ttl: u64,
-    #[arg(long, default_value_t = 1_048_576)]
+    #[arg(long, default_value_t = 1_048_576, help = "Replay buffer cap in bytes")]
     replay_buffer_bytes: usize,
 }
 
@@ -126,6 +134,13 @@ struct ServerState {
     output_tx: Option<broadcast::Sender<Vec<u8>>>,
     replay: Vec<u8>,
     detached_at: Option<SystemTime>,
+    pty_exited: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanupReason {
+    ConnectionEnd,
+    ExplicitDetach,
 }
 
 impl ServerState {
@@ -162,6 +177,7 @@ impl ServerState {
             output_tx: None,
             replay: Vec::new(),
             detached_at: None,
+            pty_exited: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -234,6 +250,7 @@ enum NeoshdError {
 
 #[tokio::main]
 async fn main() {
+    install_rustls_crypto_provider();
     let cli = Cli::parse();
     let result = match cli.command {
         Commands::Version => {
@@ -248,6 +265,10 @@ async fn main() {
         eprintln!("{}", json!({"error": err.to_string()}));
         std::process::exit(1);
     }
+}
+
+fn install_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 async fn run_renew_auth(session_id: Uuid, user: &str) -> Result<(), NeoshdError> {
@@ -435,6 +456,7 @@ async fn handle_connection(connection: Connection, state: Arc<Mutex<ServerState>
     let mut dispatcher = Dispatcher::default();
     let mut attached_epoch: Option<u64> = None;
     let mut authed = false;
+    let mut cleanup_reason = CleanupReason::ConnectionEnd;
 
     loop {
         let payload = match read_control_frame(&mut recv).await {
@@ -635,6 +657,7 @@ async fn handle_connection(connection: Connection, state: Arc<Mutex<ServerState>
                     .detach(sid, conn_id)
                     .map_err(map_session_error)?;
                 st.detached_at = Some(SystemTime::now());
+                cleanup_reason = CleanupReason::ExplicitDetach;
                 break;
             }
             MessageKind::Close => {
@@ -659,13 +682,7 @@ async fn handle_connection(connection: Connection, state: Arc<Mutex<ServerState>
 
     if let Some(epoch) = attached_epoch {
         let mut st = state.lock().await;
-        let sid = st.session_id;
-        if st
-            .sessions
-            .conditional_stale_cleanup(sid, conn_id, epoch)
-        {
-            st.detached_at = Some(SystemTime::now());
-        }
+        finalize_connection_cleanup(&mut st, conn_id, epoch, cleanup_reason);
     }
 
     connection.close(VarInt::from_u32(0), b"connection closed");
@@ -678,12 +695,17 @@ fn ensure_pty_runtime(st: &mut ServerState) -> Result<(), NeoshdError> {
         return Ok(());
     }
 
-    let mut pty = LivePty::spawn(24, 80, "sh").map_err(|e| NeoshdError::Internal(e.to_string()))?;
+    let shell = resolve_login_shell();
+    let mut pty =
+        LivePty::spawn(24, 80, &shell).map_err(|e| NeoshdError::Internal(e.to_string()))?;
     let reader = pty.take_reader().map_err(|e| NeoshdError::Internal(e.to_string()))?;
     let writer = pty.writer();
+    log_event("pty_spawn", json!({"shell": shell}));
 
     let (tx, _rx) = broadcast::channel::<Vec<u8>>(64);
     let tx_for_thread = tx.clone();
+    let pty_exited = Arc::new(AtomicBool::new(false));
+    let pty_exited_for_thread = Arc::clone(&pty_exited);
 
     std::thread::spawn(move || {
         let mut reader = reader;
@@ -697,19 +719,25 @@ fn ensure_pty_runtime(st: &mut ServerState) -> Result<(), NeoshdError> {
                 Err(_) => break,
             }
         }
+        pty_exited_for_thread.store(true, Ordering::SeqCst);
+        let _ = tx_for_thread.send(Vec::new());
     });
 
     st.pty_writer = Some(writer);
     st.output_tx = Some(tx);
     st.pty = Some(pty);
+    st.pty_exited = pty_exited;
     Ok(())
 }
 
+fn resolve_login_shell() -> String {
+    env::var("SHELL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "sh".to_string())
+}
+
 async fn start_data_plane(connection: Connection, state: Arc<Mutex<ServerState>>, resume: bool) -> Result<(), NeoshdError> {
-    let stdin_stream = connection
-        .accept_uni()
-        .await
-        .map_err(|e| NeoshdError::Protocol(format!("missing STDIN stream: {e}")))?;
     let mut stdout_stream = connection
         .open_uni()
         .await
@@ -741,6 +769,9 @@ async fn start_data_plane(connection: Connection, state: Arc<Mutex<ServerState>>
     let state_for_out = Arc::clone(&state);
     tokio::spawn(async move {
         while let Ok(chunk) = rx.recv().await {
+            if chunk.is_empty() {
+                break;
+            }
             {
                 let mut st = state_for_out.lock().await;
                 st.append_replay(&chunk);
@@ -753,7 +784,13 @@ async fn start_data_plane(connection: Connection, state: Arc<Mutex<ServerState>>
     });
 
     tokio::spawn(async move {
-        let mut stdin_stream = stdin_stream;
+        let mut stdin_stream = match connection.accept_uni().await {
+            Ok(stream) => stream,
+            Err(err) => {
+                log_event("data_plane_stdin_missing", json!({"error": err.to_string()}));
+                return;
+            }
+        };
         let mut buf = [0u8; 4096];
         loop {
             let n = match stdin_stream.read(&mut buf).await {
@@ -774,6 +811,35 @@ async fn start_data_plane(connection: Connection, state: Arc<Mutex<ServerState>>
     });
 
     Ok(())
+}
+
+fn finalize_connection_cleanup(
+    st: &mut ServerState,
+    conn_id: Uuid,
+    epoch: u64,
+    reason: CleanupReason,
+) {
+    let sid = st.session_id;
+    if reason == CleanupReason::ExplicitDetach {
+        if st.sessions.conditional_stale_cleanup(sid, conn_id, epoch) {
+            st.detached_at = Some(SystemTime::now());
+        }
+        return;
+    }
+
+    if st.pty_exited.load(Ordering::SeqCst) {
+        let _ = st.sessions.terminate(sid);
+        st.detached_at = None;
+        log_event(
+            "session_terminated",
+            json!({"session_id": sid, "reason":"pty_exit"}),
+        );
+        return;
+    }
+
+    if st.sessions.conditional_stale_cleanup(sid, conn_id, epoch) {
+        st.detached_at = Some(SystemTime::now());
+    }
 }
 
 async fn read_control_frame(recv: &mut quinn::RecvStream) -> Result<Vec<u8>, NeoshdError> {
@@ -1017,7 +1083,21 @@ fn map_session_error(err: SessionError) -> NeoshdError {
 }
 
 fn log_event(event: &str, payload: Value) {
-    eprintln!("{}", json!({"event": event, "payload": payload}));
+    eprintln!(
+        "{}",
+        json!({"ts": now_rfc3339(), "ts_ms": now_epoch_millis(), "pid": std::process::id(), "event": event, "payload": payload})
+    );
+}
+
+fn now_epoch_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+fn now_rfc3339() -> String {
+    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 #[cfg(test)]
@@ -1154,5 +1234,70 @@ mod tests {
             .tokens
             .validate_and_consume_auth(&token, sid, "alice", now)
             .is_err());
+    }
+
+    #[test]
+    fn cleanup_terminates_session_when_pty_exited() {
+        let cfg = base_new_args();
+        let sid = Uuid::new_v4();
+        let conn = Uuid::new_v4();
+        let mut state = ServerState::new(
+            sid,
+            "alice".to_string(),
+            1000,
+            "127.0.0.1:30001".to_string(),
+            "sha256:test".to_string(),
+            &cfg,
+        );
+        let epoch = state.sessions.attach_exclusive(sid, conn).unwrap();
+        state.pty_exited.store(true, Ordering::SeqCst);
+
+        finalize_connection_cleanup(&mut state, conn, epoch, CleanupReason::ConnectionEnd);
+        assert_eq!(
+            state.sessions.session(sid).unwrap().state,
+            SessionState::Terminated
+        );
+        assert!(state.detached_at.is_none());
+    }
+
+    #[test]
+    fn cleanup_marks_detached_when_connection_drops_with_live_pty() {
+        let cfg = base_new_args();
+        let sid = Uuid::new_v4();
+        let conn = Uuid::new_v4();
+        let mut state = ServerState::new(
+            sid,
+            "alice".to_string(),
+            1000,
+            "127.0.0.1:30001".to_string(),
+            "sha256:test".to_string(),
+            &cfg,
+        );
+        let epoch = state.sessions.attach_exclusive(sid, conn).unwrap();
+        state.pty_exited.store(false, Ordering::SeqCst);
+
+        finalize_connection_cleanup(&mut state, conn, epoch, CleanupReason::ConnectionEnd);
+        assert_eq!(state.sessions.session(sid).unwrap().state, SessionState::Detached);
+        assert!(state.detached_at.is_some());
+    }
+
+    #[test]
+    fn explicit_detach_wins_over_pty_exit_race() {
+        let cfg = base_new_args();
+        let sid = Uuid::new_v4();
+        let conn = Uuid::new_v4();
+        let mut state = ServerState::new(
+            sid,
+            "alice".to_string(),
+            1000,
+            "127.0.0.1:30001".to_string(),
+            "sha256:test".to_string(),
+            &cfg,
+        );
+        let epoch = state.sessions.attach_exclusive(sid, conn).unwrap();
+        state.pty_exited.store(true, Ordering::SeqCst);
+
+        finalize_connection_cleanup(&mut state, conn, epoch, CleanupReason::ExplicitDetach);
+        assert_eq!(state.sessions.session(sid).unwrap().state, SessionState::Detached);
     }
 }
