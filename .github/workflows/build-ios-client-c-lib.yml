@@ -1,0 +1,60 @@
+name: build-ios-client-c-lib
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+jobs:
+  build-ios-client-c-lib:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Add iOS Rust targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+
+      - name: Build iOS static libraries
+        run: |
+          cargo build --release --manifest-path ffi/neosh-client-c/Cargo.toml --target aarch64-apple-ios
+          cargo build --release --manifest-path ffi/neosh-client-c/Cargo.toml --target aarch64-apple-ios-sim
+          cargo build --release --manifest-path ffi/neosh-client-c/Cargo.toml --target x86_64-apple-ios
+
+      - name: Create XCFramework
+        run: |
+          mkdir -p dist
+          xcodebuild -create-xcframework \
+            -library target/aarch64-apple-ios/release/libneosh_client_c.a -headers ffi/neosh-client-c/include \
+            -library target/aarch64-apple-ios-sim/release/libneosh_client_c.a -headers ffi/neosh-client-c/include \
+            -library target/x86_64-apple-ios/release/libneosh_client_c.a -headers ffi/neosh-client-c/include \
+            -output dist/neosh_client.xcframework
+          ditto -c -k --sequesterRsrc --keepParent dist/neosh_client.xcframework dist/neosh_client.xcframework.zip
+
+      - name: Upload XCFramework artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: neosh-client-c-ios-xcframework
+          path: dist/neosh_client.xcframework.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release asset (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/neosh_client.xcframework.zip

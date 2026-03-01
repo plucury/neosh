@@ -1,0 +1,11 @@
+[package]
+name = "neosh_client_c"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "neosh_client_c"
+crate-type = ["staticlib"]
+
+[dependencies]
+neoshd = { path = "../.." }

@@ -1,97 +1,109 @@
 # neosh
 
-neosh is a QUIC-based remote terminal protocol.
+`neosh` is a QUIC-based remote terminal system with SSH bootstrap and session resume.
 
-- Spec: [`neosh_protocol_v0.1.0.md`](./neosh_protocol_v0.1.0.md)
+- Client: `neosh`
+- Server: `neoshd`
+- Protocol: [`neosh_protocol_v0.1.0.md`](./neosh_protocol_v0.1.0.md)
 - ALPN: `neosh/1`
 
-## Server-Client Sequence
+## Why neosh
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant C as Client
-    participant SSH as SSH Daemon
-    participant S as Server
+- Fast interactive shell over QUIC
+- SSH-based bootstrap and identity flow
+- Resumable detached session workflow
+- TLS fingerprint pin verification before `AUTH`
+- Simple CLI for daily use (`connect`, `detach`, `resume`)
 
-    Note over C,SSH: Bootstrap over SSH
-    C->>SSH: SSH login
-    C->>SSH: run `neoshd new --user $USER`
-    SSH-->>C: session_id + auth_token + quic_addr + cert_fingerprint
+## Quick Start
 
-    Note over C,S: QUIC + TLS 1.3 (ALPN neosh/1)
+### Build
 
-    C->>S: HELLO(protocol_version, capabilities)
-    alt protocol unsupported
-        S-->>C: ERROR(PROTOCOL_ERROR)
-        S--xC: close connection
-    else protocol accepted
-        S-->>C: HELLO_ACK(protocol_version, capabilities, session_timeout_seconds)
-    end
+```bash
+# debug
+make build
 
-    C->>S: AUTH(method=ssh-token, token=auth_token)
-    alt auth failed
-        S-->>C: ERROR(AUTH_FAILED)
-        S--xC: close connection
-    else auth success
-        S-->>C: AUTH_OK(session_id, resume_token, resume_token_expires_in_seconds)
-    end
-
-    alt fresh attach
-        C->>S: ATTACH(session_id, attach_mode=exclusive)
-        S-->>C: ATTACH_OK(session_id)
-    else resume attach
-        C->>S: RESUME(session_id, resume_token)
-        S-->>C: RESUME_OK(session_id, replay_bytes)
-        Note over S,C: replay buffered output first, then switch to live output
-    end
-
-    par data plane
-        C->>S: STDIN stream (unidirectional, bytes)
-    and
-        S->>C: STDOUT stream (unidirectional, bytes)
-    end
-
-    opt keepalive
-        C->>S: PING(nonce)
-        S-->>C: PONG(nonce)
-    end
-
-    opt detach
-        C->>S: DETACH
-        Note over S: session -> DETACHED (can resume before timeout)
-    end
-
-    opt reconnect and resume
-        C->>SSH: run `neoshd renew-auth --session-id <uuid> --user $USER`
-        SSH-->>C: session_id + auth_token + quic_addr + cert_fingerprint
-        C->>S: HELLO(protocol_version, capabilities)
-        S-->>C: HELLO_ACK(protocol_version, capabilities, session_timeout_seconds)
-        C->>S: AUTH(method=ssh-token, token=auth_token)
-        S-->>C: AUTH_OK(session_id, resume_token, resume_token_expires_in_seconds)
-        C->>S: RESUME(session_id, resume_token)
-        S-->>C: RESUME_OK(session_id, replay_bytes)
-    end
-
-    opt terminate
-        C->>S: CLOSE
-        Note over S: session -> TERMINATED
-    end
+# release
+make build RELEASE=1
 ```
 
-## Token Semantics (v0.1.0)
+Binaries:
 
-- `auth_token`: opaque, short-lived, single-use, only for `AUTH`.
-- `resume_token`: opaque, revocable, used only for `RESUME`.
-- If `auth_token` expires before `AUTH`, client must run SSH bootstrap again.
-- For reconnect/resume on a new QUIC connection, client must run SSH
-  `renew-auth` to get a fresh `auth_token`, then perform `AUTH` before `RESUME`.
+- debug: `target/debug/neosh`, `target/debug/neoshd`
+- release: `target/release/neosh`, `target/release/neoshd`
 
-## TLS Trust Bootstrap (v0.1.0)
+### Connect
 
-- `neoshd` auto-generates (or loads) TLS cert/key at bootstrap time.
-- SSH bootstrap response MUST include QUIC address and certificate fingerprint.
-- Returned `quic_addr` MUST be client-routable for that session.
-- `neosh` MUST pin and verify fingerprint on first QUIC handshake in that session.
-- `neoshd` default bind policy follows SSH-bootstrap bind policy (`bind-server=ssh`,
-  port range `30000-39999`).
+```bash
+neosh connect user@host
+```
+
+If remote `neoshd` is not in `PATH`:
+
+```bash
+neosh connect user@host --neoshd-path /path/to/neoshd
+```
+
+Enable remote `neoshd` stderr logging:
+
+```bash
+# default path: /tmp/neoshd.log
+neosh connect user@host --neoshd-log-file
+
+# custom path
+neosh connect user@host --neoshd-log-file /tmp/my-neoshd.log
+```
+
+## Session Workflow
+
+Detach from attached session:
+
+- Hotkey: press `Ctrl-a`, then `d`
+- Or from another terminal:
+
+```bash
+neosh detach
+```
+
+Resume later:
+
+```bash
+neosh resume --session-id <session-id> --target user@host
+```
+
+Resume with explicit remote server path:
+
+```bash
+neosh resume --session-id <session-id> --target user@host --neoshd-path /path/to/neoshd
+```
+
+Exit semantics:
+
+- `Ctrl-a d` / `neosh detach`: session stays resumable
+- `logout` / `exit` / `Ctrl-d`: session terminates and cannot be resumed
+
+## CLI Help
+
+```bash
+neosh --help
+neosh connect --help
+neosh resume --help
+neosh detach --help
+neoshd --help
+```
+
+## Security Notes (v0.1.0)
+
+- `auth_token`: opaque, short-lived, single-use, only for `AUTH`
+- `resume_token`: opaque, revocable, only for `RESUME`
+- If `auth_token` expires before `AUTH`, client must bootstrap again
+- Reconnect/resume requires `renew-auth` to get fresh `auth_token`, then `AUTH` before `RESUME`
+- `neosh` verifies server certificate fingerprint from SSH bootstrap before `AUTH`
+- `neoshd` default bind policy follows SSH bootstrap style (`bind-server=ssh`, port range `30000-39999`)
+
+## Project Docs
+
+- Protocol spec: [`neosh_protocol_v0.1.0.md`](./neosh_protocol_v0.1.0.md)
+- Server docs: [`docs/v0.1.0/neoshd_implementation.md`](./docs/v0.1.0/neoshd_implementation.md)
+- Client docs: [`docs/v0.1.0/neosh_implementation.md`](./docs/v0.1.0/neosh_implementation.md)
+- Delivery test guide: [`docs/v0.1.0/neosh_delivery_test.md`](./docs/v0.1.0/neosh_delivery_test.md)

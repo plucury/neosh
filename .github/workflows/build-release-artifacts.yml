@@ -10,9 +10,13 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -27,25 +31,56 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --bin neosh --bin neoshd
 
+      - name: Resolve platform suffix
+        id: vars
+        shell: bash
+        run: |
+          arch="$(uname -m)"
+          case "${{ runner.os }}" in
+            Linux) os_name="linux" ;;
+            macOS) os_name="macos" ;;
+            *) os_name="$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')" ;;
+          esac
+          case "$arch" in
+            x86_64|amd64) arch_name="x86_64" ;;
+            arm64|aarch64) arch_name="arm64" ;;
+            *) arch_name="$arch" ;;
+          esac
+          echo "suffix=${os_name}-${arch_name}" >> "$GITHUB_OUTPUT"
+
       - name: Prepare artifacts
         run: |
           mkdir -p dist
-          cp target/release/neosh dist/neosh-linux-x86_64
-          cp target/release/neoshd dist/neoshd-linux-x86_64
+          cp target/release/neosh "dist/neosh-${{ steps.vars.outputs.suffix }}"
+          cp target/release/neoshd "dist/neoshd-${{ steps.vars.outputs.suffix }}"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: neosh-release-linux-x86_64
+          name: neosh-release-${{ steps.vars.outputs.suffix }}
           path: dist/
           if-no-files-found: error
           retention-days: 14
 
-      - name: Publish GitHub Release (tag only)
-        if: startsWith(github.ref, 'refs/tags/v')
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: neosh-release-*
+          merge-multiple: true
+
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            dist/neosh-linux-x86_64
-            dist/neoshd-linux-x86_64
+            release-assets/neosh-*
+            release-assets/neoshd-*
