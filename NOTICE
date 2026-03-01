@@ -1,0 +1,7 @@
+Third-Party Notice
+
+This project uses third-party Rust crates listed in THIRD_PARTY_LICENSES.md.
+
+For the currently tracked direct dependencies (resolved from Cargo.lock), no upstream NOTICE file was found in the published crate sources.
+
+If future dependencies include NOTICE requirements, this file should be updated accordingly.
