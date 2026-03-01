@@ -605,6 +605,8 @@ name = "neosh_client_c"
 version = "0.1.0"
 dependencies = [
  "neoshd",
+ "quinn",
+ "tokio",
 ]
 
 [[package]]
