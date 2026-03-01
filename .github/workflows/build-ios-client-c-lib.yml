@@ -29,17 +29,20 @@ jobs:
 
       - name: Build iOS static libraries
         run: |
-          cargo build --release --manifest-path ffi/neosh-client-c/Cargo.toml --target aarch64-apple-ios
-          cargo build --release --manifest-path ffi/neosh-client-c/Cargo.toml --target aarch64-apple-ios-sim
-          cargo build --release --manifest-path ffi/neosh-client-c/Cargo.toml --target x86_64-apple-ios
+          cargo build --release --manifest-path ffi/neosh-client-c/Cargo.toml --target-dir target/ffi-client-c --target aarch64-apple-ios
+          cargo build --release --manifest-path ffi/neosh-client-c/Cargo.toml --target-dir target/ffi-client-c --target aarch64-apple-ios-sim
+          cargo build --release --manifest-path ffi/neosh-client-c/Cargo.toml --target-dir target/ffi-client-c --target x86_64-apple-ios
 
       - name: Create XCFramework
         run: |
           mkdir -p dist
+          ls -la target/ffi-client-c/aarch64-apple-ios/release/
+          ls -la target/ffi-client-c/aarch64-apple-ios-sim/release/
+          ls -la target/ffi-client-c/x86_64-apple-ios/release/
           xcodebuild -create-xcframework \
-            -library target/aarch64-apple-ios/release/libneosh_client_c.a -headers ffi/neosh-client-c/include \
-            -library target/aarch64-apple-ios-sim/release/libneosh_client_c.a -headers ffi/neosh-client-c/include \
-            -library target/x86_64-apple-ios/release/libneosh_client_c.a -headers ffi/neosh-client-c/include \
+            -library target/ffi-client-c/aarch64-apple-ios/release/libneosh_client_c.a -headers ffi/neosh-client-c/include \
+            -library target/ffi-client-c/aarch64-apple-ios-sim/release/libneosh_client_c.a -headers ffi/neosh-client-c/include \
+            -library target/ffi-client-c/x86_64-apple-ios/release/libneosh_client_c.a -headers ffi/neosh-client-c/include \
             -output dist/neosh_client.xcframework
           ditto -c -k --sequesterRsrc --keepParent dist/neosh_client.xcframework dist/neosh_client.xcframework.zip
 
