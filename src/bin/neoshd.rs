@@ -4,21 +4,21 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
 use clap::{Parser, Subcommand};
+use neoshd::SERVER_VERSION;
 use neoshd::protocol::dispatcher::Dispatcher;
 use neoshd::protocol::framing::{decode_frame, encode_frame};
 use neoshd::protocol::messages::{ErrorMessage, MessageKind, parse_message_kind};
 use neoshd::session::manager::{SessionError, SessionManager, SessionState};
 use neoshd::terminal::pty::LivePty;
 use neoshd::token::service::{TokenError, TokenService};
-use neoshd::SERVER_VERSION;
-use quinn::{Connection, Endpoint, ServerConfig, VarInt};
 use quinn::crypto::rustls::QuicServerConfig;
+use quinn::{Connection, Endpoint, ServerConfig, VarInt};
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use serde::{Deserialize, Serialize};
@@ -35,7 +35,9 @@ const MAX_CONTROL_FRAME: usize = 64 * 1024;
 #[derive(Debug, Parser)]
 #[command(name = "neoshd")]
 #[command(about = "Start a remote shell backend and issue bootstrap/renew tokens.")]
-#[command(after_help = "Examples:\n  neoshd new --user \"$USER\"\n  neoshd new --user \"$USER\" --bind-server 0.0.0.0 --port-range 30000:39999\n  neoshd renew-auth --session-id 550e8400-e29b-41d4-a716-446655440000 --user \"$USER\"\n  neoshd version")]
+#[command(
+    after_help = "Examples:\n  neoshd new --user \"$USER\"\n  neoshd new --user \"$USER\" --bind-server 0.0.0.0 --port-range 30000:39999\n  neoshd renew-auth --session-id 550e8400-e29b-41d4-a716-446655440000 --user \"$USER\"\n  neoshd version"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -47,7 +49,9 @@ enum Commands {
     New(NewArgs),
     #[command(about = "Issue a fresh single-use auth token for an existing session.")]
     #[command(name = "renew-auth")]
-    #[command(after_help = "Example:\n  neoshd renew-auth --session-id 550e8400-e29b-41d4-a716-446655440000 --user \"$USER\"")]
+    #[command(
+        after_help = "Example:\n  neoshd renew-auth --session-id 550e8400-e29b-41d4-a716-446655440000 --user \"$USER\""
+    )]
     RenewAuth {
         #[arg(long, help = "Session ID to renew auth token for")]
         session_id: Uuid,
@@ -62,20 +66,54 @@ enum Commands {
 struct NewArgs {
     #[arg(long, help = "Session owner user name")]
     user: String,
-    #[arg(long, default_value = "30000:39999", help = "UDP port range, format start:end")]
+    #[arg(
+        long,
+        default_value = "30000:39999",
+        help = "UDP port range, format start:end"
+    )]
     port_range: String,
-    #[arg(long, default_value = "ssh", help = "Host/IP advertised to clients in quic_addr")]
+    #[arg(
+        long,
+        default_value = "ssh",
+        help = "Host/IP advertised to clients in quic_addr"
+    )]
     bind_server: String,
-    #[arg(long, default_value = "", help = "Path to TLS certificate PEM (optional)")]
+    #[arg(
+        long,
+        default_value = "",
+        help = "Path to TLS certificate PEM (optional)"
+    )]
     tls_cert: String,
-    #[arg(long, default_value = "", help = "Path to TLS private key PEM (optional)")]
+    #[arg(
+        long,
+        default_value = "",
+        help = "Path to TLS private key PEM (optional)"
+    )]
     tls_key: String,
-    #[arg(long, default_value_t = 600, help = "Detached session timeout in seconds")]
+    #[arg(
+        long,
+        default_value = "",
+        help = "Initial working directory for the interactive shell"
+    )]
+    working_directory: String,
+    #[arg(
+        long,
+        default_value = "",
+        help = "Command to run once before entering interactive shell"
+    )]
+    command: String,
+    #[arg(
+        long,
+        default_value_t = 600,
+        help = "Detached session timeout in seconds"
+    )]
     session_timeout: u64,
     #[arg(long, default_value_t = 60, help = "Auth token TTL in seconds")]
     auth_token_ttl: u64,
     #[arg(long, default_value_t = 86400, help = "Resume token TTL in seconds")]
     resume_token_ttl: u64,
+    #[arg(long, default_value_t = 60, help = "QUIC max idle timeout in seconds")]
+    quic_idle_timeout_seconds: u64,
     #[arg(long, default_value_t = 1_048_576, help = "Replay buffer cap in bytes")]
     replay_buffer_bytes: usize,
 }
@@ -123,6 +161,8 @@ struct ServerState {
     owner_uid: u32,
     quic_addr: String,
     cert_fingerprint: String,
+    working_directory: Option<String>,
+    startup_command: Option<String>,
     session_timeout: Duration,
     auth_token_ttl: Duration,
     resume_token_ttl: Duration,
@@ -166,6 +206,8 @@ impl ServerState {
             owner_uid,
             quic_addr,
             cert_fingerprint,
+            working_directory: non_empty_arg(&cfg.working_directory),
+            startup_command: non_empty_arg(&cfg.command),
             session_timeout: Duration::from_secs(cfg.session_timeout),
             auth_token_ttl: Duration::from_secs(cfg.auth_token_ttl),
             resume_token_ttl: Duration::from_secs(cfg.resume_token_ttl),
@@ -273,9 +315,12 @@ fn install_rustls_crypto_provider() {
 
 async fn run_renew_auth(session_id: Uuid, user: &str) -> Result<(), NeoshdError> {
     let sock = ipc_socket_path(session_id);
-    let mut stream = UnixStream::connect(&sock)
-        .await
-        .map_err(|e| NeoshdError::Config(format!("cannot reach session control socket {}: {e}", sock.display())))?;
+    let mut stream = UnixStream::connect(&sock).await.map_err(|e| {
+        NeoshdError::Config(format!(
+            "cannot reach session control socket {}: {e}",
+            sock.display()
+        ))
+    })?;
 
     let req = json!({
         "session_id": session_id,
@@ -319,7 +364,10 @@ async fn run_new(args: NewArgs) -> Result<(), NeoshdError> {
         let mut locked = state.lock().await;
         locked.bootstrap_output()
     };
-    println!("{}", serde_json::to_string(&bootstrap).map_err(|e| NeoshdError::Internal(e.to_string()))?);
+    println!(
+        "{}",
+        serde_json::to_string(&bootstrap).map_err(|e| NeoshdError::Internal(e.to_string()))?
+    );
     log_event(
         "token_issued",
         json!({"token_type":"auth_token","session_id":bootstrap.session_id}),
@@ -348,7 +396,10 @@ async fn run_new(args: NewArgs) -> Result<(), NeoshdError> {
         })
     };
 
-    log_event("server_start", json!({"session_id": session_id, "quic_addr": quic_addr}));
+    log_event(
+        "server_start",
+        json!({"session_id": session_id, "quic_addr": quic_addr}),
+    );
 
     let accept_res = run_quic_accept_loop(endpoint, Arc::clone(&state)).await;
     let _ = ipc_task.abort();
@@ -372,7 +423,10 @@ async fn run_ipc_server(path: &Path, state: Arc<Mutex<ServerState>>) -> Result<(
             Ok(req) => {
                 let mut st = state.lock().await;
                 if peer_uid != st.owner_uid {
-                    log_event("renew_auth_denied", json!({"reason":"peer_uid_mismatch","peer_uid":peer_uid}));
+                    log_event(
+                        "renew_auth_denied",
+                        json!({"reason":"peer_uid_mismatch","peer_uid":peer_uid}),
+                    );
                     json!({"error": "permission denied"})
                 } else if req.session_id != st.session_id {
                     json!({"error": "session_id mismatch"})
@@ -380,7 +434,10 @@ async fn run_ipc_server(path: &Path, state: Arc<Mutex<ServerState>>) -> Result<(
                     log_event("renew_auth_denied", json!({"reason":"user_mismatch"}));
                     json!({"error": "permission denied"})
                 } else {
-                    log_event("token_issued", json!({"token_type":"auth_token","session_id":st.session_id}));
+                    log_event(
+                        "token_issued",
+                        json!({"token_type":"auth_token","session_id":st.session_id}),
+                    );
                     json!(st.bootstrap_output())
                 }
             }
@@ -399,7 +456,10 @@ fn peer_uid(stream: &UnixStream) -> Result<u32, NeoshdError> {
     Ok(cred.uid())
 }
 
-async fn run_quic_accept_loop(endpoint: Endpoint, state: Arc<Mutex<ServerState>>) -> Result<(), NeoshdError> {
+async fn run_quic_accept_loop(
+    endpoint: Endpoint,
+    state: Arc<Mutex<ServerState>>,
+) -> Result<(), NeoshdError> {
     loop {
         {
             let mut st = state.lock().await;
@@ -444,9 +504,15 @@ fn should_server_stop(st: &ServerState) -> bool {
     )
 }
 
-async fn handle_connection(connection: Connection, state: Arc<Mutex<ServerState>>) -> Result<(), NeoshdError> {
+async fn handle_connection(
+    connection: Connection,
+    state: Arc<Mutex<ServerState>>,
+) -> Result<(), NeoshdError> {
     let conn_id = Uuid::new_v4();
-    log_event("conn_open", json!({"conn_id": conn_id.to_string(), "remote": connection.remote_address().to_string()}));
+    log_event(
+        "conn_open",
+        json!({"conn_id": conn_id.to_string(), "remote": connection.remote_address().to_string()}),
+    );
 
     let (mut send, mut recv) = connection
         .accept_bi()
@@ -467,15 +533,21 @@ async fn handle_connection(connection: Connection, state: Arc<Mutex<ServerState>
         let kind = match parse_message_kind(&payload) {
             Some(k) => k,
             None => {
-                write_error_frame(&mut send, &NeoshdError::Protocol("unknown control message".to_string()))
-                    .await?;
+                write_error_frame(
+                    &mut send,
+                    &NeoshdError::Protocol("unknown control message".to_string()),
+                )
+                .await?;
                 break;
             }
         };
 
         if dispatcher.on_message(kind).is_err() {
-            write_error_frame(&mut send, &NeoshdError::Protocol("out-of-order control message".to_string()))
-                .await?;
+            write_error_frame(
+                &mut send,
+                &NeoshdError::Protocol("out-of-order control message".to_string()),
+            )
+            .await?;
             break;
         }
 
@@ -498,8 +570,11 @@ async fn handle_connection(connection: Connection, state: Arc<Mutex<ServerState>
                 let req: AuthReq = match serde_json::from_slice(&payload) {
                     Ok(v) => v,
                     Err(e) => {
-                        write_error_frame(&mut send, &NeoshdError::Protocol(format!("bad AUTH payload: {e}")))
-                            .await?;
+                        write_error_frame(
+                            &mut send,
+                            &NeoshdError::Protocol(format!("bad AUTH payload: {e}")),
+                        )
+                        .await?;
                         break;
                     }
                 };
@@ -507,17 +582,25 @@ async fn handle_connection(connection: Connection, state: Arc<Mutex<ServerState>
                     let mut st = state.lock().await;
                     let sid = st.session_id;
                     let owner = st.owner_user.clone();
-                    if let Err(err) = st
-                        .tokens
-                        .validate_and_consume_auth(&req.token, sid, &owner, SystemTime::now())
-                    {
+                    if let Err(err) = st.tokens.validate_and_consume_auth(
+                        &req.token,
+                        sid,
+                        &owner,
+                        SystemTime::now(),
+                    ) {
                         write_error_frame(&mut send, &map_token_auth_error(err)).await?;
                         log_event("auth_failed", json!({"conn_id": conn_id.to_string()}));
                         break;
                     }
-                    log_event("token_consumed", json!({"token_type":"auth_token","session_id":sid}));
+                    log_event(
+                        "token_consumed",
+                        json!({"token_type":"auth_token","session_id":sid}),
+                    );
                     let resume = st.issue_resume_token();
-                    log_event("token_issued", json!({"token_type":"resume_token","session_id":sid}));
+                    log_event(
+                        "token_issued",
+                        json!({"token_type":"resume_token","session_id":sid}),
+                    );
                     (sid, resume, st.resume_token_ttl.as_secs())
                 };
                 authed = true;
@@ -536,15 +619,21 @@ async fn handle_connection(connection: Connection, state: Arc<Mutex<ServerState>
             }
             MessageKind::Attach => {
                 if !authed {
-                    write_error_frame(&mut send, &NeoshdError::Protocol("ATTACH before AUTH".to_string()))
-                        .await?;
+                    write_error_frame(
+                        &mut send,
+                        &NeoshdError::Protocol("ATTACH before AUTH".to_string()),
+                    )
+                    .await?;
                     break;
                 }
                 let req: AttachReq = match serde_json::from_slice(&payload) {
                     Ok(v) => v,
                     Err(e) => {
-                        write_error_frame(&mut send, &NeoshdError::Protocol(format!("bad ATTACH payload: {e}")))
-                            .await?;
+                        write_error_frame(
+                            &mut send,
+                            &NeoshdError::Protocol(format!("bad ATTACH payload: {e}")),
+                        )
+                        .await?;
                         break;
                     }
                 };
@@ -555,10 +644,7 @@ async fn handle_connection(connection: Connection, state: Arc<Mutex<ServerState>
                         write_error_frame(&mut send, &NeoshdError::SessionNotFound).await?;
                         break;
                     }
-                    let epoch = match st
-                        .sessions
-                        .attach_exclusive(sid, conn_id)
-                    {
+                    let epoch = match st.sessions.attach_exclusive(sid, conn_id) {
                         Ok(v) => v,
                         Err(err) => {
                             write_error_frame(&mut send, &map_session_error(err)).await?;
@@ -581,15 +667,21 @@ async fn handle_connection(connection: Connection, state: Arc<Mutex<ServerState>
             }
             MessageKind::Resume => {
                 if !authed {
-                    write_error_frame(&mut send, &NeoshdError::Protocol("RESUME before AUTH".to_string()))
-                        .await?;
+                    write_error_frame(
+                        &mut send,
+                        &NeoshdError::Protocol("RESUME before AUTH".to_string()),
+                    )
+                    .await?;
                     break;
                 }
                 let req: ResumeReq = match serde_json::from_slice(&payload) {
                     Ok(v) => v,
                     Err(e) => {
-                        write_error_frame(&mut send, &NeoshdError::Protocol(format!("bad RESUME payload: {e}")))
-                            .await?;
+                        write_error_frame(
+                            &mut send,
+                            &NeoshdError::Protocol(format!("bad RESUME payload: {e}")),
+                        )
+                        .await?;
                         break;
                     }
                 };
@@ -598,25 +690,31 @@ async fn handle_connection(connection: Connection, state: Arc<Mutex<ServerState>
                     let sid = st.session_id;
                     let owner = st.owner_user.clone();
                     if req.session_id != st.session_id {
-                        log_event("resume_failed", json!({"conn_id": conn_id.to_string(), "reason":"session_not_found"}));
+                        log_event(
+                            "resume_failed",
+                            json!({"conn_id": conn_id.to_string(), "reason":"session_not_found"}),
+                        );
                         write_error_frame(&mut send, &NeoshdError::SessionNotFound).await?;
                         break;
                     }
-                    if let Err(err) = st
-                        .tokens
-                        .validate_resume(&req.resume_token, sid, &owner, SystemTime::now())
+                    if let Err(err) =
+                        st.tokens
+                            .validate_resume(&req.resume_token, sid, &owner, SystemTime::now())
                     {
-                        log_event("resume_failed", json!({"conn_id": conn_id.to_string(), "reason":"token_invalid"}));
+                        log_event(
+                            "resume_failed",
+                            json!({"conn_id": conn_id.to_string(), "reason":"token_invalid"}),
+                        );
                         write_error_frame(&mut send, &map_token_resume_error(err)).await?;
                         break;
                     }
-                    let epoch = match st
-                        .sessions
-                        .attach_exclusive(sid, conn_id)
-                    {
+                    let epoch = match st.sessions.attach_exclusive(sid, conn_id) {
                         Ok(v) => v,
                         Err(err) => {
-                            log_event("resume_failed", json!({"conn_id": conn_id.to_string(), "reason":"attach_denied"}));
+                            log_event(
+                                "resume_failed",
+                                json!({"conn_id": conn_id.to_string(), "reason":"attach_denied"}),
+                            );
                             write_error_frame(&mut send, &map_session_error(err)).await?;
                             break;
                         }
@@ -633,14 +731,20 @@ async fn handle_connection(connection: Connection, state: Arc<Mutex<ServerState>
                 )
                 .await?;
                 start_data_plane(connection.clone(), Arc::clone(&state), true).await?;
-                log_event("resume_ok", json!({"conn_id": conn_id.to_string(), "replay_bytes": replay_len}));
+                log_event(
+                    "resume_ok",
+                    json!({"conn_id": conn_id.to_string(), "replay_bytes": replay_len}),
+                );
             }
             MessageKind::Resize => {
                 let req: ResizeReq = match serde_json::from_slice(&payload) {
                     Ok(v) => v,
                     Err(e) => {
-                        write_error_frame(&mut send, &NeoshdError::Protocol(format!("bad RESIZE payload: {e}")))
-                            .await?;
+                        write_error_frame(
+                            &mut send,
+                            &NeoshdError::Protocol(format!("bad RESIZE payload: {e}")),
+                        )
+                        .await?;
                         break;
                     }
                 };
@@ -663,9 +767,7 @@ async fn handle_connection(connection: Connection, state: Arc<Mutex<ServerState>
             MessageKind::Close => {
                 let mut st = state.lock().await;
                 let sid = st.session_id;
-                st.sessions
-                    .terminate(sid)
-                    .map_err(map_session_error)?;
+                st.sessions.terminate(sid).map_err(map_session_error)?;
                 log_event("session_terminated", json!({"session_id": st.session_id}));
                 break;
             }
@@ -696,9 +798,17 @@ fn ensure_pty_runtime(st: &mut ServerState) -> Result<(), NeoshdError> {
     }
 
     let shell = resolve_login_shell();
-    let mut pty =
-        LivePty::spawn(24, 80, &shell).map_err(|e| NeoshdError::Internal(e.to_string()))?;
-    let reader = pty.take_reader().map_err(|e| NeoshdError::Internal(e.to_string()))?;
+    let mut pty = LivePty::spawn(
+        24,
+        80,
+        &shell,
+        st.working_directory.as_deref(),
+        st.startup_command.as_deref(),
+    )
+    .map_err(|e| NeoshdError::Internal(e.to_string()))?;
+    let reader = pty
+        .take_reader()
+        .map_err(|e| NeoshdError::Internal(e.to_string()))?;
     let writer = pty.writer();
     log_event("pty_spawn", json!({"shell": shell}));
 
@@ -737,7 +847,11 @@ fn resolve_login_shell() -> String {
         .unwrap_or_else(|| "sh".to_string())
 }
 
-async fn start_data_plane(connection: Connection, state: Arc<Mutex<ServerState>>, resume: bool) -> Result<(), NeoshdError> {
+async fn start_data_plane(
+    connection: Connection,
+    state: Arc<Mutex<ServerState>>,
+    resume: bool,
+) -> Result<(), NeoshdError> {
     let mut stdout_stream = connection
         .open_uni()
         .await
@@ -755,7 +869,11 @@ async fn start_data_plane(connection: Connection, state: Arc<Mutex<ServerState>>
             .as_ref()
             .ok_or_else(|| NeoshdError::Internal("PTY output channel missing".to_string()))?
             .clone();
-        let replay = if resume { st.replay.clone() } else { Vec::new() };
+        let replay = if resume {
+            st.replay.clone()
+        } else {
+            Vec::new()
+        };
         (writer, tx.subscribe(), replay)
     };
 
@@ -787,7 +905,10 @@ async fn start_data_plane(connection: Connection, state: Arc<Mutex<ServerState>>
         let mut stdin_stream = match connection.accept_uni().await {
             Ok(stream) => stream,
             Err(err) => {
-                log_event("data_plane_stdin_missing", json!({"error": err.to_string()}));
+                log_event(
+                    "data_plane_stdin_missing",
+                    json!({"error": err.to_string()}),
+                );
                 return;
             }
         };
@@ -862,7 +983,10 @@ async fn read_control_frame(recv: &mut quinn::RecvStream) -> Result<Vec<u8>, Neo
     Ok(decoded.to_vec())
 }
 
-async fn write_control_json(send: &mut quinn::SendStream, value: &Value) -> Result<(), NeoshdError> {
+async fn write_control_json(
+    send: &mut quinn::SendStream,
+    value: &Value,
+) -> Result<(), NeoshdError> {
     let payload = serde_json::to_vec(value).map_err(|e| NeoshdError::Internal(e.to_string()))?;
     let frame = encode_frame(&payload);
     send.write_all(&frame)
@@ -870,7 +994,10 @@ async fn write_control_json(send: &mut quinn::SendStream, value: &Value) -> Resu
         .map_err(|e| NeoshdError::Protocol(format!("write frame failed: {e}")))
 }
 
-async fn write_error_frame(send: &mut quinn::SendStream, err: &NeoshdError) -> Result<(), NeoshdError> {
+async fn write_error_frame(
+    send: &mut quinn::SendStream,
+    err: &NeoshdError,
+) -> Result<(), NeoshdError> {
     let msg = error_frame_for(err);
     write_control_json(send, &json!(msg)).await
 }
@@ -882,9 +1009,10 @@ fn error_frame_for(err: &NeoshdError) -> ErrorMessage {
         NeoshdError::SessionExpired => ("SESSION_EXPIRED", false),
         NeoshdError::AttachDenied => ("ATTACH_DENIED", false),
         NeoshdError::Protocol(_) => ("PROTOCOL_ERROR", false),
-        NeoshdError::Internal(_) | NeoshdError::Io(_) | NeoshdError::Quinn(_) | NeoshdError::Config(_) => {
-            ("INTERNAL_ERROR", true)
-        }
+        NeoshdError::Internal(_)
+        | NeoshdError::Io(_)
+        | NeoshdError::Quinn(_)
+        | NeoshdError::Config(_) => ("INTERNAL_ERROR", true),
     };
     ErrorMessage {
         msg_type: "ERROR",
@@ -896,7 +1024,9 @@ fn error_frame_for(err: &NeoshdError) -> ErrorMessage {
 
 fn validate_new_args(args: &NewArgs) -> Result<(), NeoshdError> {
     if args.port_range.split(':').count() != 2 {
-        return Err(NeoshdError::Config("--port-range must be START:END".to_string()));
+        return Err(NeoshdError::Config(
+            "--port-range must be START:END".to_string(),
+        ));
     }
     if (args.tls_cert.is_empty() && !args.tls_key.is_empty())
         || (!args.tls_cert.is_empty() && args.tls_key.is_empty())
@@ -905,6 +1035,9 @@ fn validate_new_args(args: &NewArgs) -> Result<(), NeoshdError> {
             "--tls-cert and --tls-key must be provided together".to_string(),
         ));
     }
+    let _idle_timeout: quinn::IdleTimeout = Duration::from_secs(args.quic_idle_timeout_seconds)
+        .try_into()
+        .map_err(|e| NeoshdError::Config(format!("invalid --quic-idle-timeout-seconds: {e}")))?;
     Ok(())
 }
 
@@ -912,10 +1045,7 @@ fn build_server_tls(args: &NewArgs) -> Result<(ServerConfig, String), NeoshdErro
     let (cert_der, key_der) = if args.tls_cert.is_empty() {
         let cert = generate_simple_self_signed(vec!["localhost".to_string()])
             .map_err(|e| NeoshdError::Internal(format!("generate cert failed: {e}")))?;
-        (
-            cert.cert.der().to_vec(),
-            cert.key_pair.serialize_der(),
-        )
+        (cert.cert.der().to_vec(), cert.key_pair.serialize_der())
     } else {
         load_cert_key_pair(Path::new(&args.tls_cert), Path::new(&args.tls_key))?
     };
@@ -936,6 +1066,10 @@ fn build_server_tls(args: &NewArgs) -> Result<(ServerConfig, String), NeoshdErro
 
     server_config.transport_config(Arc::new({
         let mut transport = quinn::TransportConfig::default();
+        let idle_timeout = Duration::from_secs(args.quic_idle_timeout_seconds)
+            .try_into()
+            .expect("validated in validate_new_args");
+        transport.max_idle_timeout(Some(idle_timeout));
         transport.max_concurrent_bidi_streams(VarInt::from_u32(1));
         transport.max_concurrent_uni_streams(VarInt::from_u32(8));
         transport
@@ -945,7 +1079,10 @@ fn build_server_tls(args: &NewArgs) -> Result<(ServerConfig, String), NeoshdErro
     Ok((server_config, fp))
 }
 
-fn load_cert_key_pair(cert_path: &Path, key_path: &Path) -> Result<(Vec<u8>, Vec<u8>), NeoshdError> {
+fn load_cert_key_pair(
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<(Vec<u8>, Vec<u8>), NeoshdError> {
     let cert_pem = fs::read(cert_path)?;
     let key_pem = fs::read(key_path)?;
 
@@ -1005,7 +1142,9 @@ fn resolve_bind_addrs(args: &NewArgs) -> Result<Vec<IpAddr>, NeoshdError> {
                 .map(|a| a.ip())
                 .collect();
             if addrs.is_empty() {
-                return Err(NeoshdError::Config("--bind-server resolved no addresses".to_string()));
+                return Err(NeoshdError::Config(
+                    "--bind-server resolved no addresses".to_string(),
+                ));
             }
             Ok(addrs)
         }
@@ -1048,7 +1187,9 @@ fn bind_endpoint(
             }
         }
     }
-    Err(NeoshdError::Config("no available port in range".to_string()))
+    Err(NeoshdError::Config(
+        "no available port in range".to_string(),
+    ))
 }
 
 fn ipc_socket_path(session_id: Uuid) -> PathBuf {
@@ -1060,16 +1201,22 @@ fn ipc_socket_path(session_id: Uuid) -> PathBuf {
 
 fn map_token_auth_error(err: TokenError) -> NeoshdError {
     match err {
-        TokenError::BindingMismatch | TokenError::Consumed | TokenError::Expired | TokenError::NotFound | TokenError::Revoked | TokenError::TypeMismatch => NeoshdError::AuthFailed,
+        TokenError::BindingMismatch
+        | TokenError::Consumed
+        | TokenError::Expired
+        | TokenError::NotFound
+        | TokenError::Revoked
+        | TokenError::TypeMismatch => NeoshdError::AuthFailed,
     }
 }
 
 fn map_token_resume_error(err: TokenError) -> NeoshdError {
     match err {
         TokenError::Expired | TokenError::Revoked => NeoshdError::SessionExpired,
-        TokenError::BindingMismatch | TokenError::Consumed | TokenError::NotFound | TokenError::TypeMismatch => {
-            NeoshdError::AuthFailed
-        }
+        TokenError::BindingMismatch
+        | TokenError::Consumed
+        | TokenError::NotFound
+        | TokenError::TypeMismatch => NeoshdError::AuthFailed,
     }
 }
 
@@ -1100,6 +1247,15 @@ fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+fn non_empty_arg(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1111,9 +1267,12 @@ mod tests {
             bind_server: "ssh".to_string(),
             tls_cert: String::new(),
             tls_key: String::new(),
+            working_directory: String::new(),
+            command: String::new(),
             session_timeout: 600,
             auth_token_ttl: 60,
             resume_token_ttl: 86400,
+            quic_idle_timeout_seconds: 60,
             replay_buffer_bytes: 1_048_576,
         }
     }
@@ -1230,10 +1389,12 @@ mod tests {
             .issue_auth_token(sid, "alice", Duration::from_secs(1));
         let now = SystemTime::now() + Duration::from_secs(5);
         sweep_tokens(&mut state, now, Duration::from_secs(0));
-        assert!(state
-            .tokens
-            .validate_and_consume_auth(&token, sid, "alice", now)
-            .is_err());
+        assert!(
+            state
+                .tokens
+                .validate_and_consume_auth(&token, sid, "alice", now)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1277,7 +1438,10 @@ mod tests {
         state.pty_exited.store(false, Ordering::SeqCst);
 
         finalize_connection_cleanup(&mut state, conn, epoch, CleanupReason::ConnectionEnd);
-        assert_eq!(state.sessions.session(sid).unwrap().state, SessionState::Detached);
+        assert_eq!(
+            state.sessions.session(sid).unwrap().state,
+            SessionState::Detached
+        );
         assert!(state.detached_at.is_some());
     }
 
@@ -1298,6 +1462,9 @@ mod tests {
         state.pty_exited.store(true, Ordering::SeqCst);
 
         finalize_connection_cleanup(&mut state, conn, epoch, CleanupReason::ExplicitDetach);
-        assert_eq!(state.sessions.session(sid).unwrap().state, SessionState::Detached);
+        assert_eq!(
+            state.sessions.session(sid).unwrap().state,
+            SessionState::Detached
+        );
     }
 }

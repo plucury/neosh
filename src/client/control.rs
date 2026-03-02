@@ -19,7 +19,8 @@ pub fn encode_control_json(value: &Value) -> Result<Vec<u8>, ControlError> {
 }
 
 pub fn decode_control_json(frame: &[u8], max_size: usize) -> Result<Value, ControlError> {
-    let payload = decode_frame(frame, max_size).map_err(|e| ControlError::Protocol(e.to_string()))?;
+    let payload =
+        decode_frame(frame, max_size).map_err(|e| ControlError::Protocol(e.to_string()))?;
     serde_json::from_slice(payload).map_err(|e| ControlError::Json(e.to_string()))
 }
 

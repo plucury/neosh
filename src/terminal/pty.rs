@@ -31,7 +31,13 @@ pub struct LivePty {
 }
 
 impl LivePty {
-    pub fn spawn(rows: u16, cols: u16, shell: &str) -> Result<Self, PtyError> {
+    pub fn spawn(
+        rows: u16,
+        cols: u16,
+        shell: &str,
+        working_directory: Option<&str>,
+        startup_command: Option<&str>,
+    ) -> Result<Self, PtyError> {
         let pty_system = NativePtySystem::default();
         let pair = pty_system
             .openpty(PtySize {
@@ -43,7 +49,16 @@ impl LivePty {
             .map_err(|e| PtyError::Open(e.to_string()))?;
 
         let mut cmd = CommandBuilder::new(shell);
-        cmd.arg("-li");
+        if let Some(dir) = working_directory {
+            cmd.cwd(dir);
+        }
+        if let Some(command) = startup_command {
+            cmd.arg("-lc");
+            // Run requested command first, then continue in an interactive shell.
+            cmd.arg(format!("{command}; exec {} -li", shell_single_quote(shell)));
+        } else {
+            cmd.arg("-li");
+        }
         // neoshd is started via non-interactive bootstrap, so TERM may be missing.
         // Set a sane default to keep readline/backspace and termcap behavior stable.
         let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
@@ -96,6 +111,13 @@ impl LivePty {
             .map(|_| ())
             .map_err(|e| PtyError::Wait(e.to_string()))
     }
+}
+
+fn shell_single_quote(input: &str) -> String {
+    if input.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", input.replace('\'', r"'\''"))
 }
 
 pub struct PtyRuntime {
@@ -158,7 +180,7 @@ mod tests {
 
     #[test]
     fn live_pty_supports_resize() {
-        let pty = LivePty::spawn(24, 80, "sh").unwrap();
+        let pty = LivePty::spawn(24, 80, "sh", None, None).unwrap();
         assert!(pty.resize(40, 120).is_ok());
     }
 }

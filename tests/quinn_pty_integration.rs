@@ -36,7 +36,10 @@ async fn quinn_loopback_handshake_skeleton() {
     let client_conn = client_res.expect("client task join");
 
     assert_eq!(client_conn.remote_address(), server_addr);
-    assert_eq!(server_conn.remote_address(), client_endpoint.local_addr().unwrap());
+    assert_eq!(
+        server_conn.remote_address(),
+        client_endpoint.local_addr().unwrap()
+    );
 
     client_endpoint.close(0u32.into(), b"test done");
 }

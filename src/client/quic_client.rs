@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use quinn::{ClientConfig, Connection, Endpoint};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -17,6 +18,8 @@ pub enum QuicClientError {
     FingerprintMismatch,
     #[error("invalid quic addr")]
     InvalidAddr,
+    #[error("invalid idle timeout: {0}")]
+    InvalidIdleTimeout(String),
 }
 
 #[derive(Debug)]
@@ -61,23 +64,33 @@ impl ServerCertVerifier for InsecureVerifier {
     }
 }
 
-pub fn build_insecure_pinned_client_config() -> Result<ClientConfig, QuicClientError> {
+pub fn build_insecure_pinned_client_config(
+    idle_timeout_secs: u64,
+) -> Result<ClientConfig, QuicClientError> {
     let mut rustls_cfg = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
         .with_no_client_auth();
     rustls_cfg.alpn_protocols = vec![b"neosh/1".to_vec()];
 
-    let cfg = ClientConfig::new(Arc::new(
+    let mut cfg = ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(rustls_cfg)
             .map_err(|e| QuicClientError::Connect(e.to_string()))?,
     ));
+
+    let mut transport = quinn::TransportConfig::default();
+    let idle_timeout = quinn::IdleTimeout::try_from(Duration::from_secs(idle_timeout_secs))
+        .map_err(|e| QuicClientError::InvalidIdleTimeout(e.to_string()))?;
+    transport.max_idle_timeout(Some(idle_timeout));
+    cfg.transport_config(Arc::new(transport));
+
     Ok(cfg)
 }
 
 pub async fn connect_and_verify(
     quic_addr: &str,
     expected_fingerprint: &str,
+    idle_timeout_secs: u64,
 ) -> Result<(Endpoint, Connection), QuicClientError> {
     let addr = quic_addr
         .parse()
@@ -85,7 +98,7 @@ pub async fn connect_and_verify(
 
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())
         .map_err(|e| QuicClientError::Connect(e.to_string()))?;
-    endpoint.set_default_client_config(build_insecure_pinned_client_config()?);
+    endpoint.set_default_client_config(build_insecure_pinned_client_config(idle_timeout_secs)?);
 
     let connection = endpoint
         .connect(addr, "localhost")

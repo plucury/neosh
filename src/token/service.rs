@@ -58,7 +58,13 @@ impl TokenService {
         self.issue_token(TokenType::Resume, session_id, user_id, ttl)
     }
 
-    fn issue_token(&mut self, token_type: TokenType, session_id: Uuid, user_id: &str, ttl: Duration) -> String {
+    fn issue_token(
+        &mut self,
+        token_type: TokenType,
+        session_id: Uuid,
+        user_id: &str,
+        ttl: Duration,
+    ) -> String {
         let raw = random_token();
         let hash = hash_token(raw.as_bytes());
         let now = SystemTime::now();
@@ -83,7 +89,9 @@ impl TokenService {
         user_id: &str,
         now: SystemTime,
     ) -> Result<(), TokenError> {
-        let record = self.find_record_mut(raw_token).ok_or(TokenError::NotFound)?;
+        let record = self
+            .find_record_mut(raw_token)
+            .ok_or(TokenError::NotFound)?;
 
         if record.token_type != TokenType::Auth {
             return Err(TokenError::TypeMismatch);
@@ -112,7 +120,9 @@ impl TokenService {
         user_id: &str,
         now: SystemTime,
     ) -> Result<(), TokenError> {
-        let record = self.find_record_mut(raw_token).ok_or(TokenError::NotFound)?;
+        let record = self
+            .find_record_mut(raw_token)
+            .ok_or(TokenError::NotFound)?;
 
         if record.token_type != TokenType::Resume {
             return Err(TokenError::TypeMismatch);
@@ -130,7 +140,9 @@ impl TokenService {
     }
 
     pub fn revoke_token(&mut self, raw_token: &str, now: SystemTime) -> Result<(), TokenError> {
-        let record = self.find_record_mut(raw_token).ok_or(TokenError::NotFound)?;
+        let record = self
+            .find_record_mut(raw_token)
+            .ok_or(TokenError::NotFound)?;
         record.revoked_at = Some(now);
         Ok(())
     }
@@ -189,9 +201,11 @@ mod tests {
         let now = SystemTime::now();
         let token = service.issue_auth_token(sid, "alice", Duration::from_secs(60));
 
-        assert!(service
-            .validate_and_consume_auth(&token, sid, "alice", now)
-            .is_ok());
+        assert!(
+            service
+                .validate_and_consume_auth(&token, sid, "alice", now)
+                .is_ok()
+        );
         assert_eq!(
             service.validate_and_consume_auth(&token, sid, "alice", now),
             Err(TokenError::Consumed)

@@ -8,10 +8,12 @@ use neoshd::client::quic_client::connect_and_verify;
 use neoshd::protocol::framing::encode_frame;
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use tokio::runtime::Runtime;
+use tokio::time::{Duration, timeout};
 
 const CLIENT_VERSION_CSTR: &[u8] = b"neosh/0.1.0\0";
 const PROTOCOL_VERSION_CSTR: &[u8] = b"0.1.0\0";
 const MAX_CONTROL_FRAME: usize = 64 * 1024;
+const DEFAULT_QUIC_IDLE_TIMEOUT_SECS: u64 = 60;
 
 const NEOSH_CLIENT_OK: c_int = 0;
 const NEOSH_CLIENT_ERR_INVALID_ARG: c_int = -1;
@@ -125,6 +127,31 @@ fn read_control_payload(recv: &mut RecvStream) -> Result<Vec<u8>, String> {
     })
 }
 
+fn read_control_payload_with_timeout(
+    recv: &mut RecvStream,
+    timeout_duration: Duration,
+) -> Result<Option<Vec<u8>>, String> {
+    runtime().block_on(async {
+        let mut len_buf = [0u8; 4];
+        let first = timeout(timeout_duration, recv.read_exact(&mut len_buf)).await;
+        match first {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(format!("read control length failed: {e}")),
+            Err(_) => return Ok(None),
+        }
+
+        let payload_len = u32::from_be_bytes(len_buf) as usize;
+        if payload_len > MAX_CONTROL_FRAME {
+            return Err(format!("control frame too large: {payload_len}"));
+        }
+        let mut payload = vec![0u8; payload_len];
+        recv.read_exact(&mut payload)
+            .await
+            .map_err(|e| format!("read control payload failed: {e}"))?;
+        Ok(Some(payload))
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn neosh_client_version() -> *const c_char {
     CLIENT_VERSION_CSTR.as_ptr().cast()
@@ -167,7 +194,8 @@ pub extern "C" fn neosh_client_connect(
     };
 
     let connected = runtime().block_on(async {
-        let (endpoint, conn) = connect_and_verify(&quic_addr, &expected_fingerprint)
+        let (endpoint, conn) =
+            connect_and_verify(&quic_addr, &expected_fingerprint, DEFAULT_QUIC_IDLE_TIMEOUT_SECS)
             .await
             .map_err(|e| format!("connect failed: {e}"))?;
         let (control_send, control_recv) = conn
@@ -262,8 +290,14 @@ pub extern "C" fn neosh_client_recv_control_json(
     if out_len.is_null() {
         return set_client_error(client, "out_len is null", NEOSH_CLIENT_ERR_INVALID_ARG);
     }
-    let payload = match read_control_payload(&mut client.control_recv) {
-        Ok(v) => v,
+    let payload = match read_control_payload_with_timeout(&mut client.control_recv, Duration::from_millis(20)) {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            unsafe {
+                *out_len = 0;
+            }
+            return NEOSH_CLIENT_ERR_NOT_READY;
+        }
         Err(e) => return set_client_error(client, &e, NEOSH_CLIENT_ERR_INTERNAL),
     };
     // SAFETY: out_len is non-null and writable by contract.
@@ -425,8 +459,8 @@ pub extern "C" fn neosh_client_recv_stdout(
     // SAFETY: out_buf is non-null for out_cap bytes.
     let out = unsafe { slice::from_raw_parts_mut(out_buf, out_cap) };
 
-    match runtime().block_on(async { stdout_recv.read(out).await }) {
-        Ok(Some(n)) => {
+    match runtime().block_on(async { timeout(Duration::from_millis(20), stdout_recv.read(out)).await }) {
+        Ok(Ok(Some(n))) => {
             // SAFETY: out_len/eof are validated non-null above.
             unsafe {
                 *out_len = n;
@@ -434,7 +468,7 @@ pub extern "C" fn neosh_client_recv_stdout(
             }
             NEOSH_CLIENT_OK
         }
-        Ok(None) => {
+        Ok(Ok(None)) => {
             // SAFETY: out_len/eof are validated non-null above.
             unsafe {
                 *out_len = 0;
@@ -442,10 +476,17 @@ pub extern "C" fn neosh_client_recv_stdout(
             }
             NEOSH_CLIENT_OK
         }
-        Err(e) => set_client_error(
+        Ok(Err(e)) => set_client_error(
             client,
             &format!("read stdout failed: {e}"),
             NEOSH_CLIENT_ERR_INTERNAL,
         ),
+        Err(_) => {
+            unsafe {
+                *out_len = 0;
+                *eof = 0;
+            }
+            NEOSH_CLIENT_ERR_NOT_READY
+        }
     }
 }

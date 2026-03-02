@@ -38,9 +38,8 @@ pub fn transition(state: ClientState, event: ClientEvent) -> Result<ClientState,
             ClientState::Attached
         }
         (ClientState::Attached, ClientEvent::Detached) => ClientState::Detached,
-        (ClientState::Attached, ClientEvent::Closed) | (ClientState::Detached, ClientEvent::Closed) => {
-            ClientState::Closed
-        }
+        (ClientState::Attached, ClientEvent::Closed)
+        | (ClientState::Detached, ClientEvent::Closed) => ClientState::Closed,
         (_, ClientEvent::Error) => ClientState::Closed,
         _ => return Err(StateError::InvalidTransition),
     };

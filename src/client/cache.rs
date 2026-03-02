@@ -48,7 +48,8 @@ impl SessionCache {
     pub fn put(&self, entry: &SessionCacheEntry) -> Result<(), CacheError> {
         fs::create_dir_all(&self.root).map_err(|e| CacheError::Io(e.to_string()))?;
         let path = self.root.join(format!("{}.json", entry.session_id));
-        let content = serde_json::to_vec_pretty(entry).map_err(|e| CacheError::Json(e.to_string()))?;
+        let content =
+            serde_json::to_vec_pretty(entry).map_err(|e| CacheError::Json(e.to_string()))?;
         fs::write(path, content).map_err(|e| CacheError::Io(e.to_string()))
     }
 

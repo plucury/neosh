@@ -88,9 +88,12 @@ All flags optional with defaults:
 - `--bind-server` (default: `ssh`): bind address policy (`ssh`, `any`, or explicit `<ip-or-host>`).
 - `--tls-cert` (default: empty): TLS cert file path override.
 - `--tls-key` (default: empty): TLS key file path override.
+- `--working-directory` (default: empty): initial shell working directory.
+- `--command` (default: empty): command to run once before interactive shell.
 - `--session-timeout` (default: `600`): detached-session timeout in seconds.
 - `--auth-token-ttl` (default: `60`): bootstrap auth token TTL in seconds.
 - `--resume-token-ttl` (default: `86400`): resume token TTL in seconds.
+- `--quic-idle-timeout-seconds` (default: `60`): QUIC idle timeout.
 - `--replay-buffer-bytes` (default: `1048576`): replay ring buffer size in bytes.
 
 Port allocation policy for `neoshd new`:

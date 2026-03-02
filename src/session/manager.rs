@@ -77,7 +77,10 @@ impl SessionManager {
     }
 
     pub fn assert_owner(&self, session_id: Uuid, user_id: &str) -> Result<(), SessionError> {
-        let session = self.sessions.get(&session_id).ok_or(SessionError::NotFound)?;
+        let session = self
+            .sessions
+            .get(&session_id)
+            .ok_or(SessionError::NotFound)?;
         if session.owner_user_id == user_id {
             Ok(())
         } else {
@@ -85,11 +88,20 @@ impl SessionManager {
         }
     }
 
-    pub fn attach_exclusive(&mut self, session_id: Uuid, conn_id: Uuid) -> Result<u64, SessionError> {
-        let session = self.sessions.get_mut(&session_id).ok_or(SessionError::NotFound)?;
+    pub fn attach_exclusive(
+        &mut self,
+        session_id: Uuid,
+        conn_id: Uuid,
+    ) -> Result<u64, SessionError> {
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or(SessionError::NotFound)?;
 
         match session.state {
-            SessionState::Expired | SessionState::Terminated => return Err(SessionError::InvalidState),
+            SessionState::Expired | SessionState::Terminated => {
+                return Err(SessionError::InvalidState);
+            }
             _ => {}
         }
 
@@ -105,7 +117,10 @@ impl SessionManager {
     }
 
     pub fn detach(&mut self, session_id: Uuid, conn_id: Uuid) -> Result<(), SessionError> {
-        let session = self.sessions.get_mut(&session_id).ok_or(SessionError::NotFound)?;
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or(SessionError::NotFound)?;
         if session.attached_conn_id != Some(conn_id) {
             return Err(SessionError::AttachDenied);
         }
@@ -117,7 +132,12 @@ impl SessionManager {
         Ok(())
     }
 
-    pub fn conditional_stale_cleanup(&mut self, session_id: Uuid, conn_id: Uuid, epoch: u64) -> bool {
+    pub fn conditional_stale_cleanup(
+        &mut self,
+        session_id: Uuid,
+        conn_id: Uuid,
+        epoch: u64,
+    ) -> bool {
         let Some(session) = self.sessions.get_mut(&session_id) else {
             return false;
         };
@@ -134,14 +154,20 @@ impl SessionManager {
     }
 
     pub fn terminate(&mut self, session_id: Uuid) -> Result<(), SessionError> {
-        let session = self.sessions.get_mut(&session_id).ok_or(SessionError::NotFound)?;
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or(SessionError::NotFound)?;
         session.state = SessionState::Terminated;
         session.attached_conn_id = None;
         Ok(())
     }
 
     pub fn expire(&mut self, session_id: Uuid) -> Result<(), SessionError> {
-        let session = self.sessions.get_mut(&session_id).ok_or(SessionError::NotFound)?;
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or(SessionError::NotFound)?;
         session.state = SessionState::Expired;
         session.attached_conn_id = None;
         Ok(())

@@ -82,16 +82,28 @@ mod tests {
     #[test]
     fn rejects_auth_before_hello() {
         let mut d = Dispatcher::default();
-        assert_eq!(d.on_message(MessageKind::Auth), Err(DispatchError::ProtocolOrder));
+        assert_eq!(
+            d.on_message(MessageKind::Auth),
+            Err(DispatchError::ProtocolOrder)
+        );
     }
 
     #[test]
     fn allows_valid_attach_flow() {
         let mut d = Dispatcher::default();
 
-        assert_eq!(d.on_message(MessageKind::Hello), Ok(DispatchOutcome::Continue));
-        assert_eq!(d.on_message(MessageKind::Auth), Ok(DispatchOutcome::Continue));
-        assert_eq!(d.on_message(MessageKind::Attach), Ok(DispatchOutcome::Continue));
+        assert_eq!(
+            d.on_message(MessageKind::Hello),
+            Ok(DispatchOutcome::Continue)
+        );
+        assert_eq!(
+            d.on_message(MessageKind::Auth),
+            Ok(DispatchOutcome::Continue)
+        );
+        assert_eq!(
+            d.on_message(MessageKind::Attach),
+            Ok(DispatchOutcome::Continue)
+        );
         assert_eq!(d.state(), ConnectionState::Attached);
     }
 
@@ -99,21 +111,36 @@ mod tests {
     fn allows_valid_resume_flow() {
         let mut d = Dispatcher::default();
 
-        assert_eq!(d.on_message(MessageKind::Hello), Ok(DispatchOutcome::Continue));
-        assert_eq!(d.on_message(MessageKind::Auth), Ok(DispatchOutcome::Continue));
-        assert_eq!(d.on_message(MessageKind::Resume), Ok(DispatchOutcome::Continue));
+        assert_eq!(
+            d.on_message(MessageKind::Hello),
+            Ok(DispatchOutcome::Continue)
+        );
+        assert_eq!(
+            d.on_message(MessageKind::Auth),
+            Ok(DispatchOutcome::Continue)
+        );
+        assert_eq!(
+            d.on_message(MessageKind::Resume),
+            Ok(DispatchOutcome::Continue)
+        );
         assert_eq!(d.state(), ConnectionState::Attached);
     }
 
     #[test]
     fn resize_only_valid_when_attached() {
         let mut d = Dispatcher::default();
-        assert_eq!(d.on_message(MessageKind::Resize), Err(DispatchError::ProtocolOrder));
+        assert_eq!(
+            d.on_message(MessageKind::Resize),
+            Err(DispatchError::ProtocolOrder)
+        );
 
         d.on_message(MessageKind::Hello).unwrap();
         d.on_message(MessageKind::Auth).unwrap();
         d.on_message(MessageKind::Attach).unwrap();
 
-        assert_eq!(d.on_message(MessageKind::Resize), Ok(DispatchOutcome::Continue));
+        assert_eq!(
+            d.on_message(MessageKind::Resize),
+            Ok(DispatchOutcome::Continue)
+        );
     }
 }

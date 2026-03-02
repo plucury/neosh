@@ -60,7 +60,8 @@ neosh connect user@example.com
 
 Behavior:
 
-1. SSH execute: `neoshd new --user "$USER"`.
+1. SSH execute: `neoshd new --user "$USER"` (optionally with
+   `--working-directory` and `--command`).
 2. Parse bootstrap JSON:
    - `session_id`
    - `auth_token`
@@ -71,6 +72,15 @@ Behavior:
 4. Verify server cert fingerprint matches bootstrap value.
 5. Run `HELLO` -> `AUTH` -> `ATTACH`.
 6. Start `STDIN`/`STDOUT` streams and terminal bridge.
+
+Optional connect flags in v0.1.0:
+
+- `--remote-working-directory <path>`:
+  - forwarded to `neoshd new --working-directory <path>`
+  - initial shell starts in that directory
+- `--remote-command <cmd>`:
+  - forwarded to `neoshd new --command <cmd>`
+  - command runs once, then shell stays interactive
 
 ### `neosh resume`
 
@@ -123,6 +133,17 @@ Expected output:
 - `neosh/0.1.0`
 
 ## Bootstrap Protocol Handling
+
+Bootstrap module APIs required in v0.1.0:
+
+- `runRemoteCommand(target, remoteCommand)`:
+  - run one remote shell command via SSH
+  - return trimmed stdout on success
+  - return bootstrap/SSH error on failure
+- `resolveRemoteWorkingDirectory(target)`:
+  - resolve remote current working directory via `pwd`
+  - used to normalize path-dependent remote invocations
+  - fail if directory cannot be resolved or is empty
 
 ### SSH Execution Contract
 

@@ -8,18 +8,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use clap::{Parser, Subcommand};
+use neoshd::CLIENT_VERSION;
 use neoshd::client::bootstrap::{BootstrapPayload, run_ssh_bootstrap};
 use neoshd::client::cache::{SessionCache, SessionCacheEntry, now_epoch_seconds};
 use neoshd::client::control::{encode_control_json, message_type};
 use neoshd::client::quic_client::{QuicClientError, connect_and_verify};
-use neoshd::CLIENT_VERSION;
 use quinn::{RecvStream, SendStream};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::mpsc;
 use tokio::sync::Notify;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 const MAX_CONTROL_FRAME: usize = 64 * 1024;
@@ -27,7 +27,9 @@ const MAX_CONTROL_FRAME: usize = 64 * 1024;
 #[derive(Debug, Parser)]
 #[command(name = "neosh")]
 #[command(about = "Connect, detach, and resume remote neosh sessions over QUIC.")]
-#[command(after_help = "Detach hotkey:\n  In attached session, press Ctrl-a then d.\n\nExamples:\n  neosh connect user@example.com\n  neosh connect user@example.com --neoshd-path /opt/neosh/bin/neoshd\n  neosh resume --session-id 550e8400-e29b-41d4-a716-446655440000\n  neosh detach --session-id 550e8400-e29b-41d4-a716-446655440000")]
+#[command(
+    after_help = "Detach hotkey:\n  In attached session, press Ctrl-a then d.\n\nExamples:\n  neosh connect user@example.com\n  neosh connect user@example.com --neoshd-path /opt/neosh/bin/neoshd\n  neosh resume --session-id 550e8400-e29b-41d4-a716-446655440000\n  neosh detach --session-id 550e8400-e29b-41d4-a716-446655440000"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -36,12 +38,23 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     #[command(about = "Create a new remote session and attach immediately.")]
-    #[command(after_help = "Example:\n  neosh connect user@example.com\n  neosh connect user@example.com --neoshd-path /opt/neosh/bin/neoshd")]
+    #[command(
+        after_help = "Example:\n  neosh connect user@example.com\n  neosh connect user@example.com --neoshd-path /opt/neosh/bin/neoshd"
+    )]
     Connect {
         #[arg(help = "SSH target, for example: user@example.com")]
         target: String,
         #[arg(long, default_value = "neoshd", help = "Remote neoshd executable path")]
         neoshd_path: String,
+        #[arg(
+            long,
+            help = "Initial remote working directory for the new session shell"
+        )]
+        remote_working_directory: Option<String>,
+        #[arg(long, help = "Command to run once before entering interactive shell")]
+        remote_command: Option<String>,
+        #[arg(long, default_value_t = 60, help = "QUIC max idle timeout in seconds")]
+        quic_idle_timeout_seconds: u64,
         #[arg(
             long,
             num_args = 0..=1,
@@ -52,19 +65,31 @@ enum Commands {
         neoshd_log_file: Option<String>,
     },
     #[command(about = "Resume a detached session using cached metadata.")]
-    #[command(after_help = "Example:\n  neosh resume --session-id 550e8400-e29b-41d4-a716-446655440000\n  neosh resume --session-id 550e8400-e29b-41d4-a716-446655440000 --target user@example.com")]
+    #[command(
+        after_help = "Example:\n  neosh resume --session-id 550e8400-e29b-41d4-a716-446655440000\n  neosh resume --session-id 550e8400-e29b-41d4-a716-446655440000 --target user@example.com"
+    )]
     Resume {
         #[arg(long, help = "Session ID to resume")]
         session_id: Uuid,
-        #[arg(long, help = "Optional SSH target override; default uses cached target")]
+        #[arg(
+            long,
+            help = "Optional SSH target override; default uses cached target"
+        )]
         target: Option<String>,
         #[arg(long, default_value = "neoshd", help = "Remote neoshd executable path")]
         neoshd_path: String,
+        #[arg(long, default_value_t = 60, help = "QUIC max idle timeout in seconds")]
+        quic_idle_timeout_seconds: u64,
     },
     #[command(about = "Detach an active local neosh controller via IPC.")]
-    #[command(after_help = "Example:\n  neosh detach --session-id 550e8400-e29b-41d4-a716-446655440000\n  neosh detach\n\nIn attached session, you can also detach with: Ctrl-a then d.")]
+    #[command(
+        after_help = "Example:\n  neosh detach --session-id 550e8400-e29b-41d4-a716-446655440000\n  neosh detach\n\nIn attached session, you can also detach with: Ctrl-a then d."
+    )]
     Detach {
-        #[arg(long, help = "Session ID; if omitted, auto-detect active local session socket")]
+        #[arg(
+            long,
+            help = "Session ID; if omitted, auto-detect active local session socket"
+        )]
         session_id: Option<Uuid>,
     },
     #[command(about = "Print client version.")]
@@ -104,10 +129,15 @@ struct ResumeOk {
     replay_bytes: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum BootstrapMode {
-    New,
-    Renew { session_id: Uuid },
+    New {
+        remote_working_directory: Option<String>,
+        remote_command: Option<String>,
+    },
+    Renew {
+        session_id: Uuid,
+    },
 }
 
 #[tokio::main]
@@ -122,13 +152,27 @@ async fn main() {
         Commands::Connect {
             target,
             neoshd_path,
+            remote_working_directory,
+            remote_command,
+            quic_idle_timeout_seconds,
             neoshd_log_file,
-        } => connect_cmd(&target, &neoshd_path, neoshd_log_file.as_deref()).await,
+        } => {
+            connect_cmd(
+                &target,
+                &neoshd_path,
+                remote_working_directory.as_deref(),
+                remote_command.as_deref(),
+                quic_idle_timeout_seconds,
+                neoshd_log_file.as_deref(),
+            )
+            .await
+        }
         Commands::Resume {
             session_id,
             target,
             neoshd_path,
-        } => resume_cmd(session_id, target, &neoshd_path).await,
+            quic_idle_timeout_seconds,
+        } => resume_cmd(session_id, target, &neoshd_path, quic_idle_timeout_seconds).await,
         Commands::Detach { session_id } => detach_cmd(session_id).await,
     };
 
@@ -145,17 +189,30 @@ fn install_rustls_crypto_provider() {
 async fn connect_cmd(
     target: &str,
     neoshd_path: &str,
+    remote_working_directory: Option<&str>,
+    remote_command: Option<&str>,
+    quic_idle_timeout_seconds: u64,
     neoshd_log_file: Option<&str>,
 ) -> Result<(), CliError> {
     let mut backoff = Duration::from_millis(100);
     for attempt in 0..2 {
         let payload = ssh_bootstrap_with_retry(
             target,
-            BootstrapMode::New,
+            &BootstrapMode::New {
+                remote_working_directory: remote_working_directory.map(str::to_string),
+                remote_command: remote_command.map(str::to_string),
+            },
             neoshd_path,
             neoshd_log_file,
         )?;
-        match run_session(target, payload, SessionMode::Attach).await {
+        match run_session(
+            target,
+            payload,
+            SessionMode::Attach,
+            quic_idle_timeout_seconds,
+        )
+        .await
+        {
             Ok(()) => return Ok(()),
             Err(CliError::Closed) => return Ok(()),
             Err(CliError::AuthFailed) if attempt == 0 => {
@@ -164,7 +221,13 @@ async fn connect_cmd(
                 continue;
             }
             Err(CliError::Disconnected(session_id)) => {
-                return resume_with_backoff(session_id, target.to_string(), neoshd_path).await;
+                return resume_with_backoff(
+                    session_id,
+                    target.to_string(),
+                    neoshd_path,
+                    quic_idle_timeout_seconds,
+                )
+                .await;
             }
             Err(e) => return Err(e),
         }
@@ -176,12 +239,17 @@ async fn resume_cmd(
     session_id: Uuid,
     target_override: Option<String>,
     neoshd_path: &str,
+    quic_idle_timeout_seconds: u64,
 ) -> Result<(), CliError> {
     let cache = SessionCache::new(SessionCache::default_root());
-    let cached = cache.get(session_id).map_err(|e| CliError::Cache(e.to_string()))?;
+    let cached = cache
+        .get(session_id)
+        .map_err(|e| CliError::Cache(e.to_string()))?;
     if resume_entry_expired(&cached, now_epoch_seconds()) {
         let _ = cache.delete(session_id);
-        return Err(CliError::Cache("resume token expired; start a new connect".to_string()));
+        return Err(CliError::Cache(
+            "resume token expired; start a new connect".to_string(),
+        ));
     }
 
     let target = target_override.unwrap_or(cached.ssh_target.clone());
@@ -190,25 +258,30 @@ async fn resume_cmd(
             "missing ssh_target in cache; pass --target explicitly".to_string(),
         ));
     }
-    resume_with_backoff(session_id, target, neoshd_path).await
+    resume_with_backoff(session_id, target, neoshd_path, quic_idle_timeout_seconds).await
 }
 
 async fn resume_with_backoff(
     session_id: Uuid,
     target: String,
     neoshd_path: &str,
+    quic_idle_timeout_seconds: u64,
 ) -> Result<(), CliError> {
     let cache = SessionCache::new(SessionCache::default_root());
     let mut backoff = Duration::from_millis(100);
     for attempt in 0..3 {
-        let cached = cache.get(session_id).map_err(|e| CliError::Cache(e.to_string()))?;
+        let cached = cache
+            .get(session_id)
+            .map_err(|e| CliError::Cache(e.to_string()))?;
         if resume_entry_expired(&cached, now_epoch_seconds()) {
             let _ = cache.delete(session_id);
-            return Err(CliError::Cache("resume token expired; start a new connect".to_string()));
+            return Err(CliError::Cache(
+                "resume token expired; start a new connect".to_string(),
+            ));
         }
         let payload = ssh_bootstrap_with_retry(
             &target,
-            BootstrapMode::Renew { session_id },
+            &BootstrapMode::Renew { session_id },
             neoshd_path,
             None,
         )?;
@@ -222,7 +295,9 @@ async fn resume_with_backoff(
             let mut updated = cached.clone();
             updated.quic_addr = payload.quic_addr.clone();
             updated.updated_at = now_epoch_seconds();
-            cache.put(&updated).map_err(|e| CliError::Cache(e.to_string()))?;
+            cache
+                .put(&updated)
+                .map_err(|e| CliError::Cache(e.to_string()))?;
         }
 
         match run_session(
@@ -232,6 +307,7 @@ async fn resume_with_backoff(
                 session_id,
                 resume_token: cached.resume_token.clone(),
             },
+            quic_idle_timeout_seconds,
         )
         .await
         {
@@ -249,17 +325,29 @@ async fn resume_with_backoff(
     ))
 }
 
-async fn run_session(target: &str, payload: BootstrapPayload, mode: SessionMode) -> Result<(), CliError> {
-    log_event("quic_connect_start", json!({"quic_addr": payload.quic_addr}));
-    let (endpoint, conn) = connect_and_verify(&payload.quic_addr, &payload.cert_fingerprint)
-        .await
-        .map_err(|e| {
-            if matches!(e, QuicClientError::FingerprintMismatch) {
-                log_event("fingerprint_verify_fail", json!({"error": e.to_string()}));
-            }
-            log_event("quic_connect_fail", json!({"error": e.to_string()}));
-            CliError::Quic(e.to_string())
-        })?;
+async fn run_session(
+    target: &str,
+    payload: BootstrapPayload,
+    mode: SessionMode,
+    quic_idle_timeout_seconds: u64,
+) -> Result<(), CliError> {
+    log_event(
+        "quic_connect_start",
+        json!({"quic_addr": payload.quic_addr}),
+    );
+    let (endpoint, conn) = connect_and_verify(
+        &payload.quic_addr,
+        &payload.cert_fingerprint,
+        quic_idle_timeout_seconds,
+    )
+    .await
+    .map_err(|e| {
+        if matches!(e, QuicClientError::FingerprintMismatch) {
+            log_event("fingerprint_verify_fail", json!({"error": e.to_string()}));
+        }
+        log_event("quic_connect_fail", json!({"error": e.to_string()}));
+        CliError::Quic(e.to_string())
+    })?;
     log_event("quic_connect_ok", json!({}));
     log_event("fingerprint_verify_ok", json!({}));
 
@@ -301,11 +389,13 @@ async fn run_session(target: &str, payload: BootstrapPayload, mode: SessionMode)
     }
     if message_type(&auth_value) != Some("AUTH_OK") {
         log_event("auth_fail", json!({"frame": auth_value}));
-        return Err(CliError::Protocol(format!("expected AUTH_OK, got {auth_value}")));
+        return Err(CliError::Protocol(format!(
+            "expected AUTH_OK, got {auth_value}"
+        )));
     }
     log_event("auth_ok", json!({}));
-    let auth_ok: AuthOk =
-        serde_json::from_value(auth_value).map_err(|e| CliError::Protocol(format!("bad AUTH_OK: {e}")))?;
+    let auth_ok: AuthOk = serde_json::from_value(auth_value)
+        .map_err(|e| CliError::Protocol(format!("bad AUTH_OK: {e}")))?;
 
     let cache = SessionCache::new(SessionCache::default_root());
     let cache_entry = SessionCacheEntry {
@@ -317,7 +407,9 @@ async fn run_session(target: &str, payload: BootstrapPayload, mode: SessionMode)
         cert_fingerprint: payload.cert_fingerprint.clone(),
         updated_at: now_epoch_seconds(),
     };
-    cache.put(&cache_entry).map_err(|e| CliError::Cache(e.to_string()))?;
+    cache
+        .put(&cache_entry)
+        .map_err(|e| CliError::Cache(e.to_string()))?;
 
     match mode {
         SessionMode::Attach => {
@@ -346,8 +438,8 @@ async fn run_session(target: &str, payload: BootstrapPayload, mode: SessionMode)
                 log_event("resume_fail", json!({"frame": v}));
                 return Err(CliError::Protocol(format!("RESUME failed: {v}")));
             }
-            let _resume_ok: ResumeOk =
-                serde_json::from_value(v).map_err(|e| CliError::Protocol(format!("bad RESUME_OK: {e}")))?;
+            let _resume_ok: ResumeOk = serde_json::from_value(v)
+                .map_err(|e| CliError::Protocol(format!("bad RESUME_OK: {e}")))?;
             let _ = (_resume_ok.session_id, _resume_ok.replay_bytes);
             log_event("resume_ok", json!({"session_id": auth_ok.session_id}));
         }
@@ -356,7 +448,11 @@ async fn run_session(target: &str, payload: BootstrapPayload, mode: SessionMode)
     // Send an initial terminal size right after attach/resume.
     // Waiting only for SIGWINCH means PTY may stay at default 24x80.
     if let Some((rows, cols)) = read_tty_size() {
-        let _ = send_json(&control_send, &json!({"type":"RESIZE","rows":rows,"cols":cols})).await;
+        let _ = send_json(
+            &control_send,
+            &json!({"type":"RESIZE","rows":rows,"cols":cols}),
+        )
+        .await;
     }
 
     let _raw_mode = RawModeGuard::activate();
@@ -431,7 +527,10 @@ async fn run_session(target: &str, payload: BootstrapPayload, mode: SessionMode)
         notify_detach.clone(),
         control_tx.clone(),
     ));
-    let resize_task = tokio::spawn(resize_watch_task(control_send.clone(), notify_detach.clone()));
+    let resize_task = tokio::spawn(resize_watch_task(
+        control_send.clone(),
+        notify_detach.clone(),
+    ));
     let keepalive_task = tokio::spawn(keepalive_task(control_send.clone(), notify_detach.clone()));
     let control_watch_task = tokio::spawn(control_watch_loop(control_recv, control_tx));
 
@@ -624,7 +723,9 @@ async fn read_json(recv: &mut RecvStream) -> Result<Value, CliError> {
 async fn expect_type(recv: &mut RecvStream, expected: &str) -> Result<Value, CliError> {
     let value = read_json(recv).await?;
     if message_type(&value) != Some(expected) {
-        return Err(CliError::Protocol(format!("expected {expected}, got {value}")));
+        return Err(CliError::Protocol(format!(
+            "expected {expected}, got {value}"
+        )));
     }
     Ok(value)
 }
@@ -638,7 +739,10 @@ fn ipc_socket_path(session_id: Uuid) -> PathBuf {
 
 enum SessionMode {
     Attach,
-    Resume { session_id: Uuid, resume_token: String },
+    Resume {
+        session_id: Uuid,
+        resume_token: String,
+    },
 }
 
 fn log_event(event: &str, payload: Value) {
@@ -648,10 +752,7 @@ fn log_event(event: &str, payload: Value) {
     );
 }
 
-fn process_stdin_chunk_for_detach(
-    chunk: &[u8],
-    pending_ctrl_a: bool,
-) -> (bool, Vec<u8>, bool) {
+fn process_stdin_chunk_for_detach(chunk: &[u8], pending_ctrl_a: bool) -> (bool, Vec<u8>, bool) {
     let mut out = Vec::with_capacity(chunk.len() + usize::from(pending_ctrl_a));
     let mut pending = pending_ctrl_a;
 
@@ -693,7 +794,7 @@ fn now_rfc3339() -> String {
 
 fn ssh_bootstrap_with_retry(
     target: &str,
-    mode: BootstrapMode,
+    mode: &BootstrapMode,
     neoshd_path: &str,
     neoshd_log_file: Option<&str>,
 ) -> Result<BootstrapPayload, CliError> {
@@ -718,13 +819,29 @@ fn ssh_bootstrap_with_retry(
 }
 
 fn build_remote_command(
-    mode: BootstrapMode,
+    mode: &BootstrapMode,
     neoshd_path: &str,
     neoshd_log_file: Option<&str>,
 ) -> String {
     match mode {
-        BootstrapMode::New => {
+        BootstrapMode::New {
+            remote_working_directory,
+            remote_command,
+        } => {
             let escaped_path = shell_single_quote(neoshd_path);
+            let mut extra_neoshd_args = String::new();
+            if let Some(dir) = remote_working_directory.as_deref() {
+                if !dir.trim().is_empty() {
+                    extra_neoshd_args
+                        .push_str(&format!(" --working-directory {}", shell_single_quote(dir)));
+                }
+            }
+            if let Some(command) = remote_command.as_deref() {
+                if !command.trim().is_empty() {
+                    extra_neoshd_args
+                        .push_str(&format!(" --command {}", shell_single_quote(command)));
+                }
+            }
             let log_setup = neoshd_log_file
                 .map(shell_single_quote)
                 .map(|v| format!("log_file={v}; "))
@@ -736,7 +853,7 @@ fn build_remote_command(
             };
             format!(
                 "sh -lc 'set -eu; bootstrap_file=\"$(mktemp -t neosh-bootstrap.XXXXXX)\"; \
-{log_setup}nohup {escaped_path} new --user \"$USER\" >\"$bootstrap_file\" {stderr_redirect} </dev/null & \
+{log_setup}nohup {escaped_path} new --user \"$USER\"{extra_neoshd_args} >\"$bootstrap_file\" {stderr_redirect} </dev/null & \
 for i in $(seq 1 200); do \
   if [ -s \"$bootstrap_file\" ]; then \
     head -n 1 \"$bootstrap_file\"; rm -f \"$bootstrap_file\"; exit 0; \
@@ -766,7 +883,10 @@ fn resume_entry_expired(entry: &SessionCacheEntry, now: u64) -> bool {
     entry.resume_token_expires_at <= now
 }
 
-fn validate_renew_payload(expected_session_id: Uuid, payload: &BootstrapPayload) -> Result<(), CliError> {
+fn validate_renew_payload(
+    expected_session_id: Uuid,
+    payload: &BootstrapPayload,
+) -> Result<(), CliError> {
     if payload.session_id != expected_session_id {
         return Err(CliError::Protocol(
             "renew-auth returned mismatched session_id".to_string(),
@@ -781,7 +901,8 @@ fn is_error_code(value: &Value, code: &str) -> bool {
 
 fn is_valid_detach_request(value: &Value, expected_session_id: Uuid) -> bool {
     value.get("type").and_then(|v| v.as_str()) == Some("DETACH")
-        && value.get("session_id").and_then(|v| v.as_str()) == Some(expected_session_id.to_string().as_str())
+        && value.get("session_id").and_then(|v| v.as_str())
+            == Some(expected_session_id.to_string().as_str())
 }
 
 fn session_id_from_socket_path(path: &PathBuf) -> Result<Uuid, CliError> {
@@ -802,7 +923,14 @@ fn current_euid() -> u32 {
 }
 
 fn peer_uid_matches_owner(stream: &UnixStream, owner_uid: u32) -> bool {
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
     {
         let fd = stream.as_raw_fd();
         let mut uid: libc::uid_t = 0;
@@ -853,7 +981,10 @@ enum ControlSignal {
     StreamClosed,
 }
 
-async fn control_watch_loop(mut control_recv: RecvStream, control_tx: mpsc::UnboundedSender<ControlSignal>) {
+async fn control_watch_loop(
+    mut control_recv: RecvStream,
+    control_tx: mpsc::UnboundedSender<ControlSignal>,
+) {
     while let Ok(frame) = read_json(&mut control_recv).await {
         match message_type(&frame) {
             Some("CLOSE") => {
@@ -974,7 +1105,10 @@ impl RawModeGuard {
             if rc_set != 0 {
                 return Self { fd, orig: None };
             }
-            Self { fd, orig: Some(orig) }
+            Self {
+                fd,
+                orig: Some(orig),
+            }
         }
         #[cfg(not(unix))]
         {
@@ -1017,13 +1151,20 @@ mod tests {
         let mode = BootstrapMode::Renew {
             session_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
         };
-        let cmd = build_remote_command(mode, "neoshd", None);
+        let cmd = build_remote_command(&mode, "neoshd", None);
         assert!(cmd.contains("renew-auth"));
     }
 
     #[test]
     fn custom_neoshd_path_is_used_for_bootstrap_command() {
-        let cmd = build_remote_command(BootstrapMode::New, "/opt/neosh/bin/neoshd", None);
+        let cmd = build_remote_command(
+            &BootstrapMode::New {
+                remote_working_directory: None,
+                remote_command: None,
+            },
+            "/opt/neosh/bin/neoshd",
+            None,
+        );
         assert!(cmd.contains("/opt/neosh/bin/neoshd"));
         assert!(cmd.contains("nohup"));
     }
@@ -1037,7 +1178,10 @@ mod tests {
     #[test]
     fn bootstrap_command_can_redirect_remote_logs() {
         let cmd = build_remote_command(
-            BootstrapMode::New,
+            &BootstrapMode::New {
+                remote_working_directory: None,
+                remote_command: None,
+            },
             "/opt/neosh/bin/neoshd",
             Some("/tmp/neoshd.log"),
         );
@@ -1047,20 +1191,37 @@ mod tests {
 
     #[test]
     fn bootstrap_command_without_log_file_discards_stderr() {
-        let cmd = build_remote_command(BootstrapMode::New, "/opt/neosh/bin/neoshd", None);
+        let cmd = build_remote_command(
+            &BootstrapMode::New {
+                remote_working_directory: None,
+                remote_command: None,
+            },
+            "/opt/neosh/bin/neoshd",
+            None,
+        );
         assert!(!cmd.contains("log_file="));
         assert!(cmd.contains("2>/dev/null"));
     }
 
     #[test]
+    fn bootstrap_command_includes_remote_cwd_and_command() {
+        let cmd = build_remote_command(
+            &BootstrapMode::New {
+                remote_working_directory: Some("/tmp/demo".to_string()),
+                remote_command: Some("echo hi".to_string()),
+            },
+            "neoshd",
+            None,
+        );
+        assert!(cmd.contains("--working-directory '/tmp/demo'"));
+        assert!(cmd.contains("--command 'echo hi'"));
+    }
+
+    #[test]
     fn cli_parses_log_flag_without_value_as_default_path() {
-        let cli = Cli::try_parse_from([
-            "neosh",
-            "connect",
-            "user@example.com",
-            "--neoshd-log-file",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["neosh", "connect", "user@example.com", "--neoshd-log-file"])
+                .unwrap();
         match cli.command {
             Commands::Connect {
                 neoshd_log_file, ..
@@ -1081,7 +1242,8 @@ mod tests {
             resume_token_expires_at: 1_700_000_000,
             quic_addr: "127.0.0.1:30001".to_string(),
             cert_fingerprint:
-                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
             updated_at: 1_700_000_000,
         };
         assert!(resume_entry_expired(&entry, now));
@@ -1096,7 +1258,8 @@ mod tests {
             auth_token_expires_in_seconds: 60,
             quic_addr: "127.0.0.1:30001".to_string(),
             cert_fingerprint:
-                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
         };
         assert!(validate_renew_payload(expected, &payload).is_err());
     }

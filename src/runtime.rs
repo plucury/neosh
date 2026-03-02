@@ -65,7 +65,11 @@ impl NeoshdRuntime {
             .expect("new session should always exist")
     }
 
-    pub fn renew_auth(&mut self, session_id: Uuid, user_id: &str) -> Result<BootstrapOutput, RuntimeError> {
+    pub fn renew_auth(
+        &mut self,
+        session_id: Uuid,
+        user_id: &str,
+    ) -> Result<BootstrapOutput, RuntimeError> {
         self.sessions.assert_owner(session_id, user_id)?;
         self.issue_bootstrap_for_session(session_id, user_id)
     }
@@ -75,11 +79,14 @@ impl NeoshdRuntime {
         session_id: Uuid,
         user_id: &str,
     ) -> Result<BootstrapOutput, RuntimeError> {
-        let auth_token = self
-            .tokens
-            .issue_auth_token(session_id, user_id, self.config.auth_token_ttl);
+        let auth_token =
+            self.tokens
+                .issue_auth_token(session_id, user_id, self.config.auth_token_ttl);
 
-        let session = self.sessions.session(session_id).ok_or(SessionError::NotFound)?;
+        let session = self
+            .sessions
+            .session(session_id)
+            .ok_or(SessionError::NotFound)?;
         Ok(BootstrapOutput {
             session_id,
             auth_token,
@@ -110,6 +117,9 @@ mod tests {
         let created = runtime.new_session("alice");
 
         let err = runtime.renew_auth(created.session_id, "bob").unwrap_err();
-        assert!(matches!(err, RuntimeError::Session(SessionError::PermissionDenied)));
+        assert!(matches!(
+            err,
+            RuntimeError::Session(SessionError::PermissionDenied)
+        ));
     }
 }

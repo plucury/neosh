@@ -23,6 +23,42 @@ pub enum BootstrapError {
     InvalidPayload(String),
 }
 
+pub fn run_remote_command(target: &str, remote_command: &str) -> Result<String, BootstrapError> {
+    let output = Command::new("ssh")
+        .arg(target)
+        .arg(remote_command)
+        .output()
+        .map_err(|e| BootstrapError::SshCommand(e.to_string()))?;
+
+    if !output.status.success() {
+        return Err(BootstrapError::SshCommand(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub fn resolve_remote_working_directory(target: &str) -> Result<String, BootstrapError> {
+    let pwd = run_remote_command(target, "sh -lc 'pwd'")?;
+    if pwd.is_empty() {
+        return Err(BootstrapError::SshCommand(
+            "remote working directory is empty".to_string(),
+        ));
+    }
+    Ok(pwd)
+}
+
+#[allow(non_snake_case)]
+pub fn runRemoteCommand(target: &str, remote_command: &str) -> Result<String, BootstrapError> {
+    run_remote_command(target, remote_command)
+}
+
+#[allow(non_snake_case)]
+pub fn resolveRemoteWorkingDirectory(target: &str) -> Result<String, BootstrapError> {
+    resolve_remote_working_directory(target)
+}
+
 pub fn parse_bootstrap_payload(raw: &str) -> Result<BootstrapPayload, BootstrapError> {
     let payload: BootstrapPayload =
         serde_json::from_str(raw).map_err(|e| BootstrapError::InvalidJson(e.to_string()))?;
@@ -32,7 +68,9 @@ pub fn parse_bootstrap_payload(raw: &str) -> Result<BootstrapPayload, BootstrapE
 
 pub fn validate_bootstrap_payload(payload: &BootstrapPayload) -> Result<(), BootstrapError> {
     if payload.auth_token.is_empty() {
-        return Err(BootstrapError::InvalidPayload("auth_token is empty".to_string()));
+        return Err(BootstrapError::InvalidPayload(
+            "auth_token is empty".to_string(),
+        ));
     }
     if payload.auth_token_expires_in_seconds == 0 {
         return Err(BootstrapError::InvalidPayload(
@@ -82,21 +120,12 @@ fn is_valid_host_port(input: &str) -> bool {
     port.parse::<u16>().is_ok()
 }
 
-pub fn run_ssh_bootstrap(target: &str, remote_command: &str) -> Result<BootstrapPayload, BootstrapError> {
-    let output = Command::new("ssh")
-        .arg(target)
-        .arg(remote_command)
-        .output()
-        .map_err(|e| BootstrapError::SshCommand(e.to_string()))?;
-
-    if !output.status.success() {
-        return Err(BootstrapError::SshCommand(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_bootstrap_payload(stdout.trim())
+pub fn run_ssh_bootstrap(
+    target: &str,
+    remote_command: &str,
+) -> Result<BootstrapPayload, BootstrapError> {
+    let stdout = run_remote_command(target, remote_command)?;
+    parse_bootstrap_payload(&stdout)
 }
 
 #[cfg(test)]
