@@ -1,3 +1,4 @@
+use std::env;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
@@ -43,6 +44,10 @@ impl LivePty {
 
         let mut cmd = CommandBuilder::new(shell);
         cmd.arg("-li");
+        // neoshd is started via non-interactive bootstrap, so TERM may be missing.
+        // Set a sane default to keep readline/backspace and termcap behavior stable.
+        let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
+        cmd.env("TERM", term);
 
         let child = pair
             .slave

@@ -268,7 +268,7 @@ async fn main() {
 }
 
 fn install_rustls_crypto_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
 async fn run_renew_auth(session_id: Uuid, user: &str) -> Result<(), NeoshdError> {

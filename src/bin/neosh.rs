@@ -139,7 +139,7 @@ async fn main() {
 }
 
 fn install_rustls_crypto_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
 async fn connect_cmd(
@@ -351,6 +351,12 @@ async fn run_session(target: &str, payload: BootstrapPayload, mode: SessionMode)
             let _ = (_resume_ok.session_id, _resume_ok.replay_bytes);
             log_event("resume_ok", json!({"session_id": auth_ok.session_id}));
         }
+    }
+
+    // Send an initial terminal size right after attach/resume.
+    // Waiting only for SIGWINCH means PTY may stay at default 24x80.
+    if let Some((rows, cols)) = read_tty_size() {
+        let _ = send_json(&control_send, &json!({"type":"RESIZE","rows":rows,"cols":cols})).await;
     }
 
     let _raw_mode = RawModeGuard::activate();
@@ -661,11 +667,17 @@ fn process_stdin_chunk_for_detach(
         if b == 0x01 {
             pending = true;
         } else {
-            out.push(b);
+            out.push(normalize_stdin_byte(b));
         }
     }
 
     (false, out, pending)
+}
+
+fn normalize_stdin_byte(b: u8) -> u8 {
+    // Most terminal line disciplines use DEL (^?) as erase; some clients emit ^H.
+    // Normalize ^H to DEL so backspace works consistently across terminals.
+    if b == 0x08 { 0x7f } else { b }
 }
 
 fn now_epoch_millis() -> u128 {
@@ -1124,6 +1136,22 @@ mod tests {
         let (detach, out, pending) = process_stdin_chunk_for_detach(&[0x01, b'x'], false);
         assert!(!detach);
         assert_eq!(out, vec![0x01, b'x']);
+        assert!(!pending);
+    }
+
+    #[test]
+    fn backspace_ctrl_h_is_normalized_to_del() {
+        let (detach, out, pending) = process_stdin_chunk_for_detach(&[0x08], false);
+        assert!(!detach);
+        assert_eq!(out, vec![0x7f]);
+        assert!(!pending);
+    }
+
+    #[test]
+    fn backspace_del_is_passthrough() {
+        let (detach, out, pending) = process_stdin_chunk_for_detach(&[0x7f], false);
+        assert!(!detach);
+        assert_eq!(out, vec![0x7f]);
         assert!(!pending);
     }
 }

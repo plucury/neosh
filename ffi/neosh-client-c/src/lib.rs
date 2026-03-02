@@ -54,6 +54,13 @@ fn runtime() -> &'static Runtime {
     RT.get_or_init(|| Runtime::new().expect("failed to init tokio runtime"))
 }
 
+fn ensure_rustls_crypto_provider() {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    let _ = INSTALLED.get_or_init(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 fn set_global_error(msg: &str) {
     if let Ok(mut guard) = global_last_error().lock() {
         *guard = cstring_lossy(msg);
@@ -142,6 +149,8 @@ pub extern "C" fn neosh_client_connect(
     quic_addr: *const c_char,
     expected_fingerprint: *const c_char,
 ) -> *mut neosh_client_t {
+    ensure_rustls_crypto_provider();
+
     let quic_addr = match cstr_to_string(quic_addr, "quic_addr") {
         Ok(v) => v,
         Err(e) => {
