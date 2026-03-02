@@ -35,6 +35,20 @@
 
 ## Quick Start
 
+### Install Latest `neoshd` (Linux/macOS)
+
+Install the latest GitHub Release binary to `/usr/local/bin/neoshd`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/plucury/neosh/main/scripts/install_neoshd.sh | bash
+```
+
+Optional install directory override:
+
+```bash
+INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://raw.githubusercontent.com/plucury/neosh/main/scripts/install_neoshd.sh | bash
+```
+
 ### Build
 
 ```bash
