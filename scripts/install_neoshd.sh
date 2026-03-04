@@ -4,6 +4,8 @@ set -euo pipefail
 REPO="${REPO:-plucury/neosh}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 BIN_NAME="neoshd"
+# Keep a global tmpdir initialized so EXIT trap never hits nounset, even with set -u.
+tmpdir=""
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -68,7 +70,7 @@ main() {
   need_cmd grep
   need_cmd sed
 
-  local os arch asset release_api release_json tag download_url tmpdir tmpbin
+  local os arch asset release_api release_json tag download_url tmpbin
   os="$(detect_os)"
   arch="$(detect_arch)"
   asset="${BIN_NAME}-${os}-${arch}"
