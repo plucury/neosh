@@ -96,7 +96,7 @@ main() {
   fi
 
   tmpdir="$(mktemp -d)"
-  trap 'rm -rf "$tmpdir"' EXIT
+  trap 'rm -rf "${tmpdir:-}"' EXIT
   tmpbin="${tmpdir}/${BIN_NAME}"
 
   echo "Downloading ${asset} (${tag}) ..."
