@@ -4,8 +4,16 @@ set -euo pipefail
 REPO="${REPO:-plucury/neosh}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 BIN_NAME="neoshd"
-# Keep a global tmpdir initialized so EXIT trap never hits nounset, even with set -u.
+# Keep a global tmpdir initialized so cleanup is safe under set -u.
 tmpdir=""
+
+cleanup() {
+  # Be defensive in EXIT trap path across different bash setups.
+  set +u
+  if [[ -n "${tmpdir:-}" ]]; then
+    rm -rf "${tmpdir}"
+  fi
+}
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -98,7 +106,7 @@ main() {
   fi
 
   tmpdir="$(mktemp -d)"
-  trap 'rm -rf "${tmpdir:-}"' EXIT
+  trap cleanup EXIT
   tmpbin="${tmpdir}/${BIN_NAME}"
 
   echo "Downloading ${asset} (${tag}) ..."
