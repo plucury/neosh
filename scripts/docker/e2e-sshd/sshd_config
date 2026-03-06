@@ -1,0 +1,17 @@
+Port 22222
+Protocol 2
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+PasswordAuthentication no
+PubkeyAuthentication yes
+PermitRootLogin no
+AllowUsers e2e
+AuthorizedKeysFile .ssh/authorized_keys
+StrictModes no
+ChallengeResponseAuthentication no
+UsePAM no
+X11Forwarding no
+PrintMotd no
+ClientAliveInterval 30
+ClientAliveCountMax 3
+Subsystem sftp /usr/lib/openssh/sftp-server

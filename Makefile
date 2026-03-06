@@ -1,4 +1,4 @@
-.PHONY: build build-server build-client build-client-c-lib-ios server client install
+.PHONY: build build-server build-client build-client-c-lib-ios server client install e2e e2e-server
 
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
@@ -16,6 +16,13 @@ build-server:
 
 build-client:
 	cargo build $(CARGO_PROFILE) --bin neosh
+
+e2e:
+	./scripts/e2e_docker_cli.sh
+
+e2e-server:
+	cargo build $(CARGO_PROFILE) --bin neoshd
+	cargo test --test neoshd_lifecycle_e2e -- --nocapture
 
 # Aliases so `make build server` / `make build client` also work.
 server: build-server

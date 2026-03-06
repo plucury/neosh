@@ -139,3 +139,4 @@ neoshd --help
 - Server docs: [`docs/v0.1.0/neoshd_implementation.md`](./docs/v0.1.0/neoshd_implementation.md)
 - Client docs: [`docs/v0.1.0/neosh_implementation.md`](./docs/v0.1.0/neosh_implementation.md)
 - Delivery test guide: [`docs/v0.1.0/neosh_delivery_test.md`](./docs/v0.1.0/neosh_delivery_test.md)
+- v0.1.1 requirements: [`docs/v0.1.1/README.md`](./docs/v0.1.1/README.md)

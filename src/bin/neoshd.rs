@@ -108,6 +108,12 @@ struct NewArgs {
         help = "Detached session timeout in seconds"
     )]
     session_timeout: u64,
+    #[arg(
+        long,
+        default_value_t = 300,
+        help = "Maximum time to wait for first ATTACH/RESUME in seconds; 0 disables"
+    )]
+    initial_attach_timeout: u64,
     #[arg(long, default_value_t = 60, help = "Auth token TTL in seconds")]
     auth_token_ttl: u64,
     #[arg(long, default_value_t = 86400, help = "Resume token TTL in seconds")]
@@ -163,6 +169,8 @@ struct ServerState {
     cert_fingerprint: String,
     working_directory: Option<String>,
     startup_command: Option<String>,
+    created_at: SystemTime,
+    initial_attach_timeout: Duration,
     session_timeout: Duration,
     auth_token_ttl: Duration,
     resume_token_ttl: Duration,
@@ -181,6 +189,34 @@ struct ServerState {
 enum CleanupReason {
     ConnectionEnd,
     ExplicitDetach,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AcceptLoopStopReason {
+    InitialAttachTimeout,
+    DetachedSessionTimeout,
+    SessionExpired,
+    SessionTerminated,
+    EndpointClosed,
+}
+
+impl AcceptLoopStopReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::InitialAttachTimeout => "initial_attach_timeout",
+            Self::DetachedSessionTimeout => "detached_session_timeout",
+            Self::SessionExpired => "session_expired",
+            Self::SessionTerminated => "session_terminated",
+            Self::EndpointClosed => "endpoint_closed",
+        }
+    }
+
+    fn is_auto_shutdown(self) -> bool {
+        matches!(
+            self,
+            Self::InitialAttachTimeout | Self::DetachedSessionTimeout | Self::SessionExpired
+        )
+    }
 }
 
 impl ServerState {
@@ -208,6 +244,8 @@ impl ServerState {
             cert_fingerprint,
             working_directory: non_empty_arg(&cfg.working_directory),
             startup_command: non_empty_arg(&cfg.command),
+            created_at: SystemTime::now(),
+            initial_attach_timeout: Duration::from_secs(cfg.initial_attach_timeout),
             session_timeout: Duration::from_secs(cfg.session_timeout),
             auth_token_ttl: Duration::from_secs(cfg.auth_token_ttl),
             resume_token_ttl: Duration::from_secs(cfg.resume_token_ttl),
@@ -262,6 +300,25 @@ impl ServerState {
                         }
                     }
                 }
+            }
+        }
+        false
+    }
+
+    fn expire_if_initial_attach_timeout(&mut self, now: SystemTime) -> bool {
+        if self.initial_attach_timeout.is_zero() {
+            return false;
+        }
+        let Some(session) = self.sessions.session(self.session_id) else {
+            return false;
+        };
+        if session.state != SessionState::Created {
+            return false;
+        }
+        if let Ok(elapsed) = now.duration_since(self.created_at) {
+            if elapsed >= self.initial_attach_timeout {
+                let _ = self.sessions.expire(self.session_id);
+                return true;
             }
         }
         false
@@ -368,6 +425,7 @@ async fn run_new(args: NewArgs) -> Result<(), NeoshdError> {
         "{}",
         serde_json::to_string(&bootstrap).map_err(|e| NeoshdError::Internal(e.to_string()))?
     );
+    std::io::stdout().flush()?;
     log_event(
         "token_issued",
         json!({"token_type":"auth_token","session_id":bootstrap.session_id}),
@@ -398,15 +456,55 @@ async fn run_new(args: NewArgs) -> Result<(), NeoshdError> {
 
     log_event(
         "server_start",
-        json!({"session_id": session_id, "quic_addr": quic_addr}),
+        json!({
+            "session_id": session_id,
+            "quic_addr": quic_addr,
+            "initial_attach_timeout_seconds": args.initial_attach_timeout,
+            "detached_session_timeout_seconds": args.session_timeout
+        }),
     );
+    if args.initial_attach_timeout == 0 {
+        log_event(
+            "initial_attach_timeout_disabled",
+            json!({"session_id": session_id}),
+        );
+    } else {
+        log_event(
+            "initial_attach_timeout_armed",
+            json!({
+                "session_id": session_id,
+                "timeout_seconds": args.initial_attach_timeout
+            }),
+        );
+    }
 
     let accept_res = run_quic_accept_loop(endpoint, Arc::clone(&state)).await;
     let _ = ipc_task.abort();
     let _ = sweep_task.abort();
     let _ = fs::remove_file(&ipc_path);
 
-    accept_res
+    match accept_res {
+        Ok(reason) => {
+            log_event(
+                "server_stop",
+                json!({"session_id": session_id, "reason": reason.as_str()}),
+            );
+            if reason.is_auto_shutdown() {
+                log_event(
+                    "server_auto_shutdown",
+                    json!({"session_id": session_id, "reason": reason.as_str()}),
+                );
+            }
+            Ok(())
+        }
+        Err(err) => {
+            log_event(
+                "server_stop_error",
+                json!({"session_id": session_id, "error": err.to_string()}),
+            );
+            Err(err)
+        }
+    }
 }
 
 async fn run_ipc_server(path: &Path, state: Arc<Mutex<ServerState>>) -> Result<(), NeoshdError> {
@@ -459,22 +557,26 @@ fn peer_uid(stream: &UnixStream) -> Result<u32, NeoshdError> {
 async fn run_quic_accept_loop(
     endpoint: Endpoint,
     state: Arc<Mutex<ServerState>>,
-) -> Result<(), NeoshdError> {
+) -> Result<AcceptLoopStopReason, NeoshdError> {
     loop {
         {
             let mut st = state.lock().await;
+            if st.expire_if_initial_attach_timeout(SystemTime::now()) {
+                log_event("initial_attach_timeout", json!({"session_id": st.session_id}));
+                return Ok(AcceptLoopStopReason::InitialAttachTimeout);
+            }
             if st.expire_if_detached_timeout(SystemTime::now()) {
                 log_event("session_expired", json!({"session_id": st.session_id}));
-                break;
+                return Ok(AcceptLoopStopReason::DetachedSessionTimeout);
             }
-            if should_server_stop(&st) {
-                break;
+            if let Some(reason) = server_stop_reason(&st) {
+                return Ok(reason);
             }
         }
 
         let incoming = match tokio::time::timeout(Duration::from_secs(1), endpoint.accept()).await {
             Ok(Some(x)) => x,
-            Ok(None) => break,
+            Ok(None) => return Ok(AcceptLoopStopReason::EndpointClosed),
             Err(_) => continue,
         };
 
@@ -494,14 +596,14 @@ async fn run_quic_accept_loop(
         });
     }
 
-    Ok(())
 }
 
-fn should_server_stop(st: &ServerState) -> bool {
-    matches!(
-        st.sessions.session(st.session_id).map(|s| s.state),
-        Some(SessionState::Terminated | SessionState::Expired)
-    )
+fn server_stop_reason(st: &ServerState) -> Option<AcceptLoopStopReason> {
+    match st.sessions.session(st.session_id).map(|s| s.state) {
+        Some(SessionState::Terminated) => Some(AcceptLoopStopReason::SessionTerminated),
+        Some(SessionState::Expired) => Some(AcceptLoopStopReason::SessionExpired),
+        _ => None,
+    }
 }
 
 async fn handle_connection(
@@ -1270,6 +1372,7 @@ mod tests {
             working_directory: String::new(),
             command: String::new(),
             session_timeout: 600,
+            initial_attach_timeout: 300,
             auth_token_ttl: 60,
             resume_token_ttl: 86400,
             quic_idle_timeout_seconds: 60,
@@ -1345,6 +1448,51 @@ mod tests {
     }
 
     #[test]
+    fn initial_attach_timeout_moves_created_session_to_expired() {
+        let mut cfg = base_new_args();
+        cfg.initial_attach_timeout = 60;
+        let sid = Uuid::new_v4();
+        let mut state = ServerState::new(
+            sid,
+            "alice".to_string(),
+            1000,
+            "127.0.0.1:30001".to_string(),
+            "sha256:test".to_string(),
+            &cfg,
+        );
+        state.created_at = SystemTime::now() - Duration::from_secs(120);
+        assert!(state.expire_if_initial_attach_timeout(SystemTime::now()));
+        assert_eq!(
+            state.sessions.session(sid).unwrap().state,
+            SessionState::Expired
+        );
+    }
+
+    #[test]
+    fn initial_attach_timeout_ignored_after_attach() {
+        let mut cfg = base_new_args();
+        cfg.initial_attach_timeout = 60;
+        let sid = Uuid::new_v4();
+        let mut state = ServerState::new(
+            sid,
+            "alice".to_string(),
+            1000,
+            "127.0.0.1:30001".to_string(),
+            "sha256:test".to_string(),
+            &cfg,
+        );
+        let conn = Uuid::new_v4();
+        state.sessions.attach_exclusive(sid, conn).unwrap();
+        state.created_at = SystemTime::now() - Duration::from_secs(120);
+
+        assert!(!state.expire_if_initial_attach_timeout(SystemTime::now()));
+        assert_eq!(
+            state.sessions.session(sid).unwrap().state,
+            SessionState::Attached
+        );
+    }
+
+    #[test]
     fn server_stop_condition_matches_terminal_states() {
         let cfg = base_new_args();
         let sid = Uuid::new_v4();
@@ -1356,10 +1504,13 @@ mod tests {
             "sha256:test".to_string(),
             &cfg,
         );
-        assert!(!should_server_stop(&state));
+        assert!(server_stop_reason(&state).is_none());
 
         state.sessions.terminate(sid).unwrap();
-        assert!(should_server_stop(&state));
+        assert!(matches!(
+            server_stop_reason(&state),
+            Some(AcceptLoopStopReason::SessionTerminated)
+        ));
     }
 
     #[test]

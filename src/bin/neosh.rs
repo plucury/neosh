@@ -512,14 +512,14 @@ async fn run_session(
         }
     });
 
-    let stdin_stream = conn
-        .open_uni()
-        .await
-        .map_err(|e| CliError::Protocol(format!("open stdin stream failed: {e}")))?;
     let stdout_stream = conn
         .accept_uni()
         .await
         .map_err(|e| CliError::Protocol(format!("accept stdout stream failed: {e}")))?;
+    let stdin_stream = conn
+        .open_uni()
+        .await
+        .map_err(|e| CliError::Protocol(format!("open stdin stream failed: {e}")))?;
 
     let bridge_task = tokio::spawn(bridge_terminal(
         stdin_stream,
@@ -558,6 +558,14 @@ async fn run_session(
                     disconnected = true;
                 }
                 ControlSignal::StreamClosed => {
+                    // Remote PTY stream ended (typically shell exited). Ask server
+                    // to close session state so it can stop immediately.
+                    let _ = send_json(
+                        &control_send,
+                        &json!({"type":"CLOSE","session_id":auth_ok.session_id}),
+                    )
+                    .await;
+                    log_event("close_sent", json!({"session_id": auth_ok.session_id}));
                     log_event(
                         "close_received",
                         json!({"session_id": auth_ok.session_id, "source":"stdout_eof"}),
@@ -828,22 +836,22 @@ fn build_remote_command(
             remote_working_directory,
             remote_command,
         } => {
-            let escaped_path = shell_single_quote(neoshd_path);
+            let escaped_path = shell_double_quote(neoshd_path);
             let mut extra_neoshd_args = String::new();
             if let Some(dir) = remote_working_directory.as_deref() {
                 if !dir.trim().is_empty() {
                     extra_neoshd_args
-                        .push_str(&format!(" --working-directory {}", shell_single_quote(dir)));
+                        .push_str(&format!(" --working-directory {}", shell_double_quote(dir)));
                 }
             }
             if let Some(command) = remote_command.as_deref() {
                 if !command.trim().is_empty() {
                     extra_neoshd_args
-                        .push_str(&format!(" --command {}", shell_single_quote(command)));
+                        .push_str(&format!(" --command {}", shell_double_quote(command)));
                 }
             }
             let log_setup = neoshd_log_file
-                .map(shell_single_quote)
+                .map(shell_double_quote)
                 .map(|v| format!("log_file={v}; "))
                 .unwrap_or_default();
             let stderr_redirect = if neoshd_log_file.is_some() {
@@ -872,11 +880,24 @@ echo \"bootstrap timeout\" >&2; rm -f \"$bootstrap_file\"; exit 1'"
     }
 }
 
+#[cfg(test)]
 fn shell_single_quote(input: &str) -> String {
     if input.is_empty() {
         return "''".to_string();
     }
     format!("'{}'", input.replace('\'', r"'\''"))
+}
+
+fn shell_double_quote(input: &str) -> String {
+    if input.is_empty() {
+        return "\"\"".to_string();
+    }
+    let escaped = input
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('`', "\\`");
+    format!("\"{escaped}\"")
 }
 
 fn resume_entry_expired(entry: &SessionCacheEntry, now: u64) -> bool {
@@ -1185,7 +1206,7 @@ mod tests {
             "/opt/neosh/bin/neoshd",
             Some("/tmp/neoshd.log"),
         );
-        assert!(cmd.contains("log_file='/tmp/neoshd.log';"));
+        assert!(cmd.contains("log_file=\"/tmp/neoshd.log\";"));
         assert!(cmd.contains("2>>\"$log_file\""));
     }
 
@@ -1213,8 +1234,8 @@ mod tests {
             "neoshd",
             None,
         );
-        assert!(cmd.contains("--working-directory '/tmp/demo'"));
-        assert!(cmd.contains("--command 'echo hi'"));
+        assert!(cmd.contains("--working-directory \"/tmp/demo\""));
+        assert!(cmd.contains("--command \"echo hi\""));
     }
 
     #[test]
