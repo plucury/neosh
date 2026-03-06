@@ -22,6 +22,18 @@ KEY_PATH="$TMP_DIR/id_ed25519"
 NEOSH_BIN="${NEOSH_E2E_NEOSH_BIN:-$ROOT_DIR/target/e2e-linux/debug/neosh}"
 NEOSHD_BIN="${NEOSH_E2E_NEOSHD_BIN:-$ROOT_DIR/target/e2e-linux/debug/neoshd}"
 
+to_abs_path() {
+  local p="$1"
+  if [[ "$p" = /* ]]; then
+    printf '%s\n' "$p"
+  else
+    printf '%s/%s\n' "$PWD" "$p"
+  fi
+}
+
+NEOSH_BIN="$(to_abs_path "$NEOSH_BIN")"
+NEOSHD_BIN="$(to_abs_path "$NEOSHD_BIN")"
+
 cleanup() {
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   if [[ "${KEEP_E2E_ARTIFACTS:-0}" == "1" ]]; then
