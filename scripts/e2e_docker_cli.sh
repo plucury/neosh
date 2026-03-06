@@ -35,6 +35,9 @@ NEOSH_BIN="$(to_abs_path "$NEOSH_BIN")"
 NEOSHD_BIN="$(to_abs_path "$NEOSHD_BIN")"
 
 cleanup() {
+  if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || true)" == "true" ]]; then
+    docker exec "$CONTAINER_NAME" /bin/bash -lc "chown -R $(id -u):$(id -g) /e2e" >/dev/null 2>&1 || true
+  fi
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   if [[ "${KEEP_E2E_ARTIFACTS:-0}" == "1" ]]; then
     echo "[e2e] keeping artifacts at: $TMP_DIR"
