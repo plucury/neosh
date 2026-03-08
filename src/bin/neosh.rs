@@ -1,8 +1,10 @@
 use std::env;
 use std::fs;
+use std::io::IsTerminal;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -221,6 +223,9 @@ async fn connect_cmd(
                 continue;
             }
             Err(CliError::Disconnected(session_id)) => {
+                if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+                    return Ok(());
+                }
                 return resume_with_backoff(
                     session_id,
                     target.to_string(),
@@ -469,8 +474,11 @@ async fn run_session(
         .map_err(|e| CliError::Io(e.to_string()))?;
 
     let detach_signal = notify_detach.clone();
+    let detach_requested_from_ipc = std::sync::Arc::new(AtomicBool::new(false));
+    let detach_requested_from_ipc_task = detach_requested_from_ipc.clone();
     let owner_uid = current_euid();
     let expected_session_id = auth_ok.session_id;
+    let ipc_control_send = control_send.clone();
     tokio::spawn(async move {
         loop {
             let (mut stream, _) = match listener.accept().await {
@@ -501,9 +509,29 @@ async fn run_session(
                 }
             };
             if is_valid_detach_request(&req, expected_session_id) {
-                let _ = stream.write_all(br#"{"ok":true}"#).await;
-                detach_signal.notify_waiters();
-                break;
+                detach_requested_from_ipc_task.store(true, Ordering::SeqCst);
+                let detach_sent = async {
+                    let frame = encode_control_json(&json!({"type":"DETACH"})).ok()?;
+                    let mut guard = ipc_control_send.lock().await;
+                    guard.write_all(&frame).await.ok()?;
+                    guard.flush().await.ok()
+                }
+                .await
+                .is_some();
+                if detach_sent {
+                    log_event(
+                        "detach_sent",
+                        json!({"session_id": expected_session_id, "source":"ipc"}),
+                    );
+                    let _ = stream.write_all(br#"{"ok":true}"#).await;
+                    detach_signal.notify_waiters();
+                    break;
+                } else {
+                    detach_requested_from_ipc_task.store(false, Ordering::SeqCst);
+                    let _ = stream
+                        .write_all(br#"{"ok":false,"error":"failed to send detach"}"#)
+                        .await;
+                }
             } else {
                 let _ = stream
                     .write_all(br#"{"ok":false,"error":"invalid detach request"}"#)
@@ -537,7 +565,11 @@ async fn run_session(
     let mut should_send_detach = true;
     let mut disconnected = false;
     tokio::select! {
-        _ = notify_detach.notified() => {}
+        _ = notify_detach.notified() => {
+            if detach_requested_from_ipc.load(Ordering::SeqCst) {
+                should_send_detach = false;
+            }
+        }
         Some(signal) = control_rx.recv() => {
             match signal {
                 ControlSignal::Close => {
@@ -555,7 +587,9 @@ async fn run_session(
                 }
                 ControlSignal::Disconnected => {
                     should_send_detach = false;
-                    disconnected = true;
+                    if !detach_requested_from_ipc.load(Ordering::SeqCst) {
+                        disconnected = true;
+                    }
                 }
                 ControlSignal::StreamClosed => {
                     // Remote PTY stream ended (typically shell exited). Ask server
@@ -595,7 +629,12 @@ async fn run_session(
 
     endpoint.close(0u32.into(), b"client close");
     if disconnected {
-        return Err(CliError::Disconnected(auth_ok.session_id));
+        if !detach_requested_from_ipc.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if !detach_requested_from_ipc.load(Ordering::SeqCst) {
+            return Err(CliError::Disconnected(auth_ok.session_id));
+        }
     }
     Ok(())
 }
