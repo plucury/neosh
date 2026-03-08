@@ -90,7 +90,7 @@ All flags optional with defaults:
 - `--tls-key` (default: empty): TLS key file path override.
 - `--working-directory` (default: empty): initial shell working directory.
 - `--command` (default: empty): command to run once before interactive shell.
-- `--session-timeout` (default: `600`): detached-session timeout in seconds.
+- `--session-timeout` (default: `600`): detached-session timeout in seconds; `0` disables.
 - `--auth-token-ttl` (default: `60`): bootstrap auth token TTL in seconds.
 - `--resume-token-ttl` (default: `86400`): resume token TTL in seconds.
 - `--quic-idle-timeout-seconds` (default: `60`): QUIC idle timeout.

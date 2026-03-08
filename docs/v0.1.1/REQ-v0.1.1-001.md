@@ -30,7 +30,7 @@ attach/resume.
    disabled, including configured timeout seconds when armed.
 5. After first successful attach/resume, this timeout MUST no longer apply.
    Existing detached timeout policy (`--session-timeout`) continues to control
-   post-detach expiry.
+   post-detach expiry (use `0` to disable).
 
 ## Compatibility
 
