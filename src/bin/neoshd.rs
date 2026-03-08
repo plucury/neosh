@@ -105,7 +105,7 @@ struct NewArgs {
     #[arg(
         long,
         default_value_t = 600,
-        help = "Detached session timeout in seconds"
+        help = "Detached session timeout in seconds; 0 disables"
     )]
     session_timeout: u64,
     #[arg(
@@ -290,6 +290,9 @@ impl ServerState {
     }
 
     fn expire_if_detached_timeout(&mut self, now: SystemTime) -> bool {
+        if self.session_timeout.is_zero() {
+            return false;
+        }
         if let Some(detached_at) = self.detached_at {
             if let Ok(elapsed) = now.duration_since(detached_at) {
                 if elapsed >= self.session_timeout {
@@ -1444,6 +1447,27 @@ mod tests {
         assert_eq!(
             state.sessions.session(sid).unwrap().state,
             SessionState::Expired
+        );
+    }
+
+    #[test]
+    fn detached_timeout_disabled_when_zero() {
+        let mut cfg = base_new_args();
+        cfg.session_timeout = 0;
+        let sid = Uuid::new_v4();
+        let mut state = ServerState::new(
+            sid,
+            "alice".to_string(),
+            1000,
+            "127.0.0.1:30001".to_string(),
+            "sha256:test".to_string(),
+            &cfg,
+        );
+        state.detached_at = Some(SystemTime::now() - Duration::from_secs(86400));
+        assert!(!state.expire_if_detached_timeout(SystemTime::now()));
+        assert_eq!(
+            state.sessions.session(sid).unwrap().state,
+            SessionState::Created
         );
     }
 
