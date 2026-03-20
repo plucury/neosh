@@ -1,10 +1,11 @@
 # neosh
 
-`neosh` is a QUIC-based remote terminal system with SSH bootstrap and session resume.
+`neosh` is a QUIC-based remote terminal system with SSH bootstrap, session
+resume, and same-client reconnect continuity.
 
-- Client: `neosh`
-- Server: `neoshd`
-- Protocol: [`neosh_protocol_v0.1.0.md`](./neosh_protocol_v0.1.0.md)
+- Client version: `neosh/0.2.0`
+- Server version: `neoshd/0.2.0`
+- Protocol spec: [`neosh_protocol_v0.1.0.md`](./neosh_protocol_v0.1.0.md)
 - ALPN: `neosh/1`
 
 ## neosh vs SSH
@@ -76,6 +77,18 @@ If remote `neoshd` is not in `PATH`:
 neosh connect user@host --neoshd-path /path/to/neoshd
 ```
 
+Start the remote shell in a specific directory:
+
+```bash
+neosh connect user@host --remote-working-directory /srv/app
+```
+
+Run a command before entering the interactive shell:
+
+```bash
+neosh connect user@host --remote-command 'cd /srv/app && exec zsh -l'
+```
+
 Enable remote `neoshd` stderr logging:
 
 ```bash
@@ -114,6 +127,23 @@ Exit semantics:
 - `Ctrl-a d` / `neosh detach`: session stays resumable
 - `logout` / `exit` / `Ctrl-d`: session terminates and cannot be resumed
 
+Automatic reconnect behavior:
+
+- Interactive TTY sessions automatically attempt `renew-auth` + `RESUME` after
+  unexpected QUIC disconnects.
+- If the server negotiated `client-id-v1` and the reconnect uses the same local
+  `client_id`, `neoshd` can take over the stale attached connection.
+- Non-interactive sessions do not auto-reattach the terminal after disconnect.
+
+Client local state:
+
+- `client_id`: `$XDG_STATE_HOME/neosh/client_id`
+  or `$HOME/.local/state/neosh/client_id`
+- Session cache: `$XDG_CACHE_HOME/neosh/sessions/<session-id>.json`
+  or `$HOME/.cache/neosh/sessions/<session-id>.json`
+- Local detach socket: `$XDG_RUNTIME_DIR/neosh/<session-id>.sock`
+  or `/tmp/neosh/<session-id>.sock`
+
 ## CLI Help
 
 ```bash
@@ -121,22 +151,45 @@ neosh --help
 neosh connect --help
 neosh resume --help
 neosh detach --help
+neosh version
 neoshd --help
+neoshd version
 ```
 
-## Security Notes (v0.1.0)
+## Server Defaults
+
+Default `neoshd new` values:
+
+- `--port-range 30000:39999`
+- `--bind-server ssh`
+- `--session-timeout 600`
+- `--initial-attach-timeout 300`
+- `--auth-token-ttl 60`
+- `--resume-token-ttl 86400`
+- `--quic-idle-timeout-seconds 60`
+- `--replay-buffer-bytes 1048576`
+
+## Security Notes
 
 - `auth_token`: opaque, short-lived, single-use, only for `AUTH`
 - `resume_token`: opaque, revocable, only for `RESUME`
 - If `auth_token` expires before `AUTH`, client must bootstrap again
 - Reconnect/resume requires `renew-auth` to get fresh `auth_token`, then `AUTH` before `RESUME`
 - `neosh` verifies server certificate fingerprint from SSH bootstrap before `AUTH`
-- `neoshd` default bind policy follows SSH bootstrap style (`bind-server=ssh`, port range `30000-39999`)
+- `neoshd` auto-generates a self-signed TLS certificate when `--tls-cert` and
+  `--tls-key` are not provided
+- Same-client reconnect semantics are enabled only when both peers negotiate
+  capability `client-id-v1`
 
 ## Project Docs
 
 - Protocol spec: [`neosh_protocol_v0.1.0.md`](./neosh_protocol_v0.1.0.md)
-- Server docs: [`docs/v0.1.0/neoshd_implementation.md`](./docs/v0.1.0/neoshd_implementation.md)
-- Client docs: [`docs/v0.1.0/neosh_implementation.md`](./docs/v0.1.0/neosh_implementation.md)
+- v0.2.0 docs index: [`docs/v0.2.0/README.md`](./docs/v0.2.0/README.md)
+- Client docs: [`docs/v0.2.0/neosh_implementation.md`](./docs/v0.2.0/neosh_implementation.md)
+- Server docs: [`docs/v0.2.0/neoshd_implementation.md`](./docs/v0.2.0/neoshd_implementation.md)
+- C FFI docs: [`docs/v0.2.0/neosh-client-c_implementation.md`](./docs/v0.2.0/neosh-client-c_implementation.md)
+- Legacy server docs: [`docs/v0.1.0/neoshd_implementation.md`](./docs/v0.1.0/neoshd_implementation.md)
+- Legacy client docs: [`docs/v0.1.0/neosh_implementation.md`](./docs/v0.1.0/neosh_implementation.md)
 - Delivery test guide: [`docs/v0.1.0/neosh_delivery_test.md`](./docs/v0.1.0/neosh_delivery_test.md)
 - v0.1.1 requirements: [`docs/v0.1.1/README.md`](./docs/v0.1.1/README.md)
+- v0.2.0 requirements: [`docs/v0.2.0/README.md`](./docs/v0.2.0/README.md)

@@ -1,8 +1,24 @@
 # neosh Protocol Specification
 
-## Version: v0.1.0
+## Version: v0.1.0 (with v0.2.0-draft deltas)
 
 ALPN: `neosh/1`
+
+------------------------------------------------------------------------
+
+# 0. Change Notes (v0.2.0-draft)
+
+The following updates are applied directly in this file and marked inline:
+
+- `[CHANGED v0.2.0-draft]` Optional `client_id` added to `AUTH` and `RESUME`.
+- `[ADDED v0.2.0-draft]` Capability `client-id-v1`.
+- `[ADDED v0.2.0-draft]` Same-client fast reconnect takeover semantics.
+- `[ADDED v0.2.0-draft]` Client identity security notes.
+
+Backwards compatibility policy:
+
+- If `client-id-v1` is not negotiated, implementations MUST use v0.1.0
+  behavior.
 
 ------------------------------------------------------------------------
 
@@ -45,7 +61,7 @@ sequenceDiagram
         S-->>C: HELLO_ACK(protocol_version, capabilities, session_timeout_seconds)
     end
 
-    C->>S: AUTH(method=ssh-token, token=auth_token)
+    C->>S: AUTH(method=ssh-token, token=auth_token, client_id?)
     alt auth failed
         S-->>C: ERROR(AUTH_FAILED)
         S--xC: close connection
@@ -57,7 +73,7 @@ sequenceDiagram
         C->>S: ATTACH(session_id, attach_mode=exclusive)
         S-->>C: ATTACH_OK(session_id)
     else resume attach
-        C->>S: RESUME(session_id, resume_token)
+        C->>S: RESUME(session_id, resume_token, client_id?)
         S-->>C: RESUME_OK(session_id, replay_bytes)
         Note over S,C: replay buffered output first, then switch to live output
     end
@@ -83,9 +99,9 @@ sequenceDiagram
         SSH-->>C: session_id + auth_token + quic_addr + cert_fingerprint
         C->>S: HELLO(protocol_version, capabilities)
         S-->>C: HELLO_ACK(protocol_version, capabilities, session_timeout_seconds)
-        C->>S: AUTH(method=ssh-token, token=auth_token)
+        C->>S: AUTH(method=ssh-token, token=auth_token, client_id?)
         S-->>C: AUTH_OK(session_id, resume_token, resume_token_expires_in_seconds)
-        C->>S: RESUME(session_id, resume_token)
+        C->>S: RESUME(session_id, resume_token, client_id?)
         S-->>C: RESUME_OK(session_id, replay_bytes)
     end
 
@@ -183,7 +199,7 @@ Client → Server
   "type": "HELLO",
   "protocol_version": "0.1.0",
   "client_version": "neosh/0.1.0",
-  "capabilities": ["stdin-bytes", "resume-v1"]
+  "capabilities": ["stdin-bytes", "resume-v1", "client-id-v1"]
 }
 ```
 
@@ -194,10 +210,13 @@ Server → Client
   "type": "HELLO_ACK",
   "protocol_version": "0.1.0",
   "server_version": "neoshd/0.1.0",
-  "capabilities": ["stdin-bytes", "resume-v1"],
+  "capabilities": ["stdin-bytes", "resume-v1", "client-id-v1"],
   "session_timeout_seconds": 600
 }
 ```
+
+`[ADDED v0.2.0-draft]` `client-id-v1` indicates support for client identity
+semantics in AUTH/RESUME.
 
 If `protocol_version` is unsupported, server MUST return:
 
@@ -219,9 +238,13 @@ Client → Server
 {
   "type": "AUTH",
   "method": "ssh-token",
-  "token": "opaque-token"
+  "token": "opaque-token",
+  "client_id": "uuid"
 }
 ```
+
+`[CHANGED v0.2.0-draft]` `client_id` is OPTIONAL for compatibility. When
+`client-id-v1` is negotiated, client SHOULD send stable `client_id`.
 
 Server → Client (success)
 
@@ -277,9 +300,13 @@ Client → Server
 {
   "type": "RESUME",
   "session_id": "uuid",
-  "resume_token": "opaque-token"
+  "resume_token": "opaque-token",
+  "client_id": "uuid"
 }
 ```
+
+`[CHANGED v0.2.0-draft]` `client_id` is OPTIONAL for compatibility. When
+`client-id-v1` is negotiated, server may use it for same-client takeover.
 
 Server → Client (success)
 
@@ -376,6 +403,18 @@ Rules:
 -   Detached-session inactivity for `session_timeout_seconds` moves to EXPIRED.
 -   CLOSE moves session to TERMINATED.
 
+`[ADDED v0.2.0-draft]` Same-client takeover semantics (only when
+`client-id-v1` is negotiated):
+
+-   Server tracks `active_client_id` for currently attached connection.
+-   If session is ATTACHED and incoming `RESUME.client_id ==
+    active_client_id`, server MAY replace owner connection immediately.
+-   If incoming `client_id` differs, server MUST reject with
+    `ERROR(ATTACH_DENIED)` unless cross-client takeover is explicitly enabled
+    by implementation policy.
+-   If `client_id` is absent, server SHOULD fall back to v0.1.0 exclusive
+    attach behavior.
+
 Timeout definitions:
 
 -   `session_timeout_seconds` controls detached-session inactivity timeout.
@@ -413,12 +452,16 @@ codes.
 
 # 10. Capability Negotiation
 
-v0.1.0 defines:
+v0.1.0 + v0.2.0-draft defines:
 
 -   stdin-bytes
 -   resume-v1
+-   client-id-v1 (`[ADDED v0.2.0-draft]`)
 
 Future capabilities must be ignored if unsupported.
+
+`[ADDED v0.2.0-draft]` If `client-id-v1` is not negotiated, behavior MUST
+remain compatible with v0.1.0.
 
 ------------------------------------------------------------------------
 
@@ -474,6 +517,14 @@ implementation-defined and not parsed by clients.
 -   Invalid or expired `resume_token` MUST return `ERROR(SESSION_EXPIRED)` or
     `ERROR(AUTH_FAILED)` by implementation policy.
 -   Server MAY rotate `resume_token` on successful resume.
+
+## 11.5 Client Identity (`client_id`) `[ADDED v0.2.0-draft]`
+
+-   `client_id` is an ownership hint for reconnect behavior, not an auth
+    credential.
+-   Server MUST NOT treat `client_id` alone as proof of user identity.
+-   Authentication remains token-based (`auth_token` and `resume_token`).
+-   Client SHOULD persist stable `client_id` per local runtime instance.
 
 ------------------------------------------------------------------------
 
