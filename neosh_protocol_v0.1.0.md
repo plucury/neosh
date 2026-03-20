@@ -1,19 +1,20 @@
 # neosh Protocol Specification
 
-## Version: v0.1.0 (with v0.2.0-draft deltas)
+## Version: v0.1.0
 
 ALPN: `neosh/1`
 
 ------------------------------------------------------------------------
 
-# 0. Change Notes (v0.2.0-draft)
+# 0. Change Notes
 
-The following updates are applied directly in this file and marked inline:
+The following `neosh/0.2.0` compatible extensions are documented inline in this
+file while the wire `protocol_version` remains `0.1.0`:
 
-- `[CHANGED v0.2.0-draft]` Optional `client_id` added to `AUTH` and `RESUME`.
-- `[ADDED v0.2.0-draft]` Capability `client-id-v1`.
-- `[ADDED v0.2.0-draft]` Same-client fast reconnect takeover semantics.
-- `[ADDED v0.2.0-draft]` Client identity security notes.
+- `[CHANGED in neosh/0.2.0]` Optional `client_id` added to `AUTH` and `RESUME`.
+- `[ADDED in neosh/0.2.0]` Capability `client-id-v1`.
+- `[ADDED in neosh/0.2.0]` Same-client fast reconnect takeover semantics.
+- `[ADDED in neosh/0.2.0]` Client identity security notes.
 
 Backwards compatibility policy:
 
@@ -215,7 +216,7 @@ Server → Client
 }
 ```
 
-`[ADDED v0.2.0-draft]` `client-id-v1` indicates support for client identity
+`[ADDED in neosh/0.2.0]` `client-id-v1` indicates support for client identity
 semantics in AUTH/RESUME.
 
 If `protocol_version` is unsupported, server MUST return:
@@ -243,7 +244,7 @@ Client → Server
 }
 ```
 
-`[CHANGED v0.2.0-draft]` `client_id` is OPTIONAL for compatibility. When
+`[CHANGED in neosh/0.2.0]` `client_id` is OPTIONAL for compatibility. When
 `client-id-v1` is negotiated, client SHOULD send stable `client_id`.
 
 Server → Client (success)
@@ -305,7 +306,7 @@ Client → Server
 }
 ```
 
-`[CHANGED v0.2.0-draft]` `client_id` is OPTIONAL for compatibility. When
+`[CHANGED in neosh/0.2.0]` `client_id` is OPTIONAL for compatibility. When
 `client-id-v1` is negotiated, server may use it for same-client takeover.
 
 Server → Client (success)
@@ -403,7 +404,7 @@ Rules:
 -   Detached-session inactivity for `session_timeout_seconds` moves to EXPIRED.
 -   CLOSE moves session to TERMINATED.
 
-`[ADDED v0.2.0-draft]` Same-client takeover semantics (only when
+`[ADDED in neosh/0.2.0]` Same-client takeover semantics (only when
 `client-id-v1` is negotiated):
 
 -   Server tracks `active_client_id` for currently attached connection.
@@ -452,15 +453,15 @@ codes.
 
 # 10. Capability Negotiation
 
-v0.1.0 + v0.2.0-draft defines:
+v0.1.0 with implemented `neosh/0.2.0` extensions defines:
 
 -   stdin-bytes
 -   resume-v1
--   client-id-v1 (`[ADDED v0.2.0-draft]`)
+-   client-id-v1 (`[ADDED in neosh/0.2.0]`)
 
 Future capabilities must be ignored if unsupported.
 
-`[ADDED v0.2.0-draft]` If `client-id-v1` is not negotiated, behavior MUST
+`[ADDED in neosh/0.2.0]` If `client-id-v1` is not negotiated, behavior MUST
 remain compatible with v0.1.0.
 
 ------------------------------------------------------------------------
@@ -518,7 +519,7 @@ implementation-defined and not parsed by clients.
     `ERROR(AUTH_FAILED)` by implementation policy.
 -   Server MAY rotate `resume_token` on successful resume.
 
-## 11.5 Client Identity (`client_id`) `[ADDED v0.2.0-draft]`
+## 11.5 Client Identity (`client_id`) `[ADDED in neosh/0.2.0]`
 
 -   `client_id` is an ownership hint for reconnect behavior, not an auth
     credential.
